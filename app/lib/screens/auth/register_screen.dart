@@ -104,6 +104,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
             decoration: const InputDecoration(labelText: 'Password', helperText: 'At least 8 characters', prefixIcon: Icon(Icons.lock_outline)),
             validator: (v) => (v ?? '').length >= 8 ? null : 'Use at least 8 characters',
           ),
+          const SizedBox(height: 16),
+          TextFormField(
+            obscureText: true,
+            decoration: const InputDecoration(labelText: 'Confirm password', prefixIcon: Icon(Icons.lock_outline)),
+            validator: (v) => v == _password.text ? null : 'Passwords do not match',
+          ),
           const SizedBox(height: 12),
           CheckboxListTile(
             value: _agree,
