@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launch screen on Android 11 and older: the 3D SkillBridge S on brand teal. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/brand_splash"/>
+    <item><bitmap android:gravity="center" android:src="@drawable/launch_mark"/></item>
+</layer-list>

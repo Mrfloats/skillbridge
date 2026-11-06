@@ -1,0 +1,106 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>html,body{margin:0;background:transparent}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"./node_modules/three/build/three.module.js","three/addons/":"./node_modules/three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const q = new URLSearchParams(location.search);
+const MODE = q.get('mode') || 'icon';   // icon | mark | appicon
+const SIZE = +(q.get('size') || 1600);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(SIZE, SIZE);
+renderer.toneMapping = THREE.NeutralToneMapping;
+renderer.toneMappingExposure = 0.95;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 0.55;
+
+// --- the S route, from the 2D logo (1024 box, y down) ---
+const P = (x, y, z = 0) => new THREE.Vector3((x - 512) / 100, -(y - 512) / 100, z);
+const segs = [
+  [[708,352],[668,268],[572,240],[500,240]],
+  [[500,240],[392,240],[316,298],[316,382]],
+  [[316,382],[316,470],[400,494],[512,520]],
+  [[512,520],[624,546],[708,572],[708,650]],
+  [[708,650],[708,734],[632,784],[524,784]],
+  [[524,784],[452,784],[356,756],[316,672]],
+];
+const path = new THREE.CurvePath();
+for (const s of segs) path.add(new THREE.CubicBezierCurve3(...s.map(([x, y]) => P(x, y))));
+
+const mark = new THREE.Group();
+const white = new THREE.MeshPhysicalMaterial({ color: 0xF7FAF9, roughness: 0.22, clearcoat: 1, clearcoatRoughness: 0.08, sheen: 0.3 });
+const amber = new THREE.MeshPhysicalMaterial({ color: 0xE39A2E, roughness: 0.3, metalness: 0.05, clearcoat: 1, clearcoatRoughness: 0.05 });
+const tube = new THREE.Mesh(new THREE.TubeGeometry(path, 400, 0.52, 48, false), white);
+tube.castShadow = true; tube.receiveShadow = true;
+mark.add(tube);
+for (const [x, y] of [[708, 352], [316, 672]]) {
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(0.52, 48, 32), white); cap.position.copy(P(x, y)); mark.add(cap);
+  const s = new THREE.Mesh(new THREE.SphereGeometry(0.86, 64, 48), amber);
+  s.position.copy(P(x, y, 0.35)); s.castShadow = true; mark.add(s);
+}
+
+// --- the tile ---
+function roundedRect(w, h, r) {
+  const s = new THREE.Shape(), x = -w / 2, y = -h / 2;
+  s.moveTo(x + r, y); s.lineTo(x + w - r, y); s.quadraticCurveTo(x + w, y, x + w, y + r);
+  s.lineTo(x + w, y + h - r); s.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  s.lineTo(x + r, y + h); s.quadraticCurveTo(x, y + h, x, y + h - r);
+  s.lineTo(x, y + r); s.quadraticCurveTo(x, y, x + r, y);
+  return s;
+}
+const teal = new THREE.MeshPhysicalMaterial({ color: 0x0C6262, roughness: 0.38, clearcoat: 0.6, clearcoatRoughness: 0.2 });
+const tileGeo = new THREE.ExtrudeGeometry(roundedRect(9.6, 9.6, 2.1), { depth: 0.9, bevelEnabled: true, bevelThickness: 0.35, bevelSize: 0.35, bevelSegments: 12, curveSegments: 48 });
+tileGeo.translate(0, 0, -1.25);
+const tile = new THREE.Mesh(tileGeo, teal);
+tile.receiveShadow = true; tile.castShadow = true;
+
+// --- lights ---
+const key = new THREE.DirectionalLight(0xffffff, 2.2);
+key.position.set(-6, 9, 12); key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048); key.shadow.radius = 8; key.shadow.bias = -0.0005;
+Object.assign(key.shadow.camera, { left: -9, right: 9, top: 9, bottom: -9, near: 1, far: 40 });
+scene.add(key);
+const rim = new THREE.DirectionalLight(0xBFE5E1, 0.9); rim.position.set(8, -4, 6); scene.add(rim);
+scene.add(new THREE.AmbientLight(0xffffff, 0.15));
+
+const root = new THREE.Group();
+root.add(mark);
+let camera;
+if (MODE === 'icon') {
+  root.add(tile);
+  root.rotation.set(-0.28, 0.42, 0);
+  root.position.y = 0.6;
+  camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100); camera.position.set(0, 0, 29);
+  // soft contact shadow under the tile
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), new THREE.ShadowMaterial({ opacity: 0.14 }));
+  ground.rotation.x = -Math.PI / 2; ground.position.y = -5.6; ground.receiveShadow = true; scene.add(ground);
+  key.position.set(-5, 14, 10);
+} else if (MODE === 'mark') {
+  root.rotation.set(-0.22, 0.35, 0.02);
+  camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100); camera.position.set(0, 0, 21);
+} else { // appicon: straight on, full-bleed teal behind, mark in relief
+  const bg = new THREE.Mesh(new THREE.PlaneGeometry(10.24, 10.24), new THREE.MeshPhysicalMaterial({ color: 0x0C6262, roughness: 0.5 }));
+  bg.position.z = -0.6; bg.receiveShadow = true; root.add(bg);
+  mark.scale.setScalar(0.96);
+  camera = new THREE.OrthographicCamera(-5.12, 5.12, 5.12, -5.12, 0.1, 100); camera.position.set(0, 0, 20);
+  key.position.set(-5, 7, 12);
+}
+scene.add(root);
+key.target = root;
+
+renderer.render(scene, camera);
+window.__png = renderer.domElement.toDataURL('image/png');
+</script>
+</body></html>

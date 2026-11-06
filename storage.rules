@@ -1,0 +1,24 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() { return request.auth != null; }
+    function isAdmin() { return signedIn() && request.auth.token.admin == true; }
+    function isImage() { return request.resource.contentType.matches('image/.*') && request.resource.size < 5 * 1024 * 1024; }
+
+    // National ID, selfie, certificates: owner + admins only (NFR-2.3).
+    match /verification/{uid}/{file} {
+      allow read: if (signedIn() && request.auth.uid == uid) || isAdmin();
+      allow write: if signedIn() && request.auth.uid == uid && isImage();
+    }
+    // Public profile photos and portfolio.
+    match /profiles/{uid}/{file} {
+      allow read: if signedIn();
+      allow write: if signedIn() && request.auth.uid == uid && isImage();
+    }
+    // Booking and chat photos: written by the uploader, readable by signed-in users holding the link.
+    match /bookings/{bookingId}/{uid}/{file} {
+      allow read: if signedIn();
+      allow write: if signedIn() && request.auth.uid == uid && isImage();
+    }
+  }
+}

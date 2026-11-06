@@ -1,0 +1,33 @@
+{
+  "indexes": [
+    { "collectionGroup": "bookings", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "clientId", "order": "ASCENDING" }, { "fieldPath": "serviceDate", "order": "DESCENDING" } ] },
+    { "collectionGroup": "bookings", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "providerId", "order": "ASCENDING" }, { "fieldPath": "serviceDate", "order": "DESCENDING" } ] },
+    { "collectionGroup": "bookings", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "completedAt", "order": "ASCENDING" } ] },
+    { "collectionGroup": "bookings", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" } ] },
+    { "collectionGroup": "bookings", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "acceptedAt", "order": "ASCENDING" } ] },
+    { "collectionGroup": "providers", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "isVerified", "order": "ASCENDING" }, { "fieldPath": "categoryIds", "arrayConfig": "CONTAINS" } ] },
+    { "collectionGroup": "reviews", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "providerId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] },
+    { "collectionGroup": "notifications", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "userId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] },
+    { "collectionGroup": "providerServices", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "providerId", "order": "ASCENDING" }, { "fieldPath": "title", "order": "ASCENDING" } ] },
+    { "collectionGroup": "withdrawals", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "userId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] },
+    { "collectionGroup": "withdrawals", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" } ] },
+    { "collectionGroup": "sosAlerts", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] },
+    { "collectionGroup": "disputes", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" } ] },
+    { "collectionGroup": "providers", "queryScope": "COLLECTION", "fields": [
+      { "fieldPath": "verificationStatus", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" } ] }
+  ],
+  "fieldOverrides": []
+}

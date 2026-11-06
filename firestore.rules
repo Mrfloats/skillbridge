@@ -1,0 +1,182 @@
+rules_version = '2';
+
+// SkillBridge Firestore security rules (NFR-2.3).
+// Money, status changes and verification are written only by Cloud Functions (Admin SDK bypasses rules).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isAdmin() { return signedIn() && request.auth.token.admin == true; }
+    function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
+    function changed() { return request.resource.data.diff(resource.data).affectedKeys(); }
+    function onlyChanges(keys) { return changed().hasOnly(keys); }
+    function booking(id) { return get(/databases/$(database)/documents/bookings/$(id)).data; }
+    function isParty(b) { return signedIn() && (b.clientId == request.auth.uid || b.providerId == request.auth.uid); }
+
+    // ---------- Users ----------
+    match /users/{uid} {
+      allow read: if isSelf(uid) || isAdmin();
+      allow create: if isSelf(uid)
+        && request.resource.data.role in ['client', 'provider']
+        && request.resource.data.isSuspended == false;
+      allow update: if isSelf(uid)
+        && !changed().hasAny(['role', 'isSuspended', 'email', 'createdAt'])
+        // phoneVerified can only be set once the phone is actually linked to the account.
+        && (!changed().hasAny(['phoneVerified']) || request.auth.token.phone_number != null);
+      allow delete: if false;
+    }
+
+    // ---------- Providers ----------
+    match /providers/{uid} {
+      allow read: if signedIn();
+      allow create: if isSelf(uid)
+        && request.resource.data.verificationStatus == 'pending'
+        && request.resource.data.isVerified == false
+        && request.resource.data.get('avgRating', 0) == 0
+        && request.resource.data.get('reviewCount', 0) == 0
+        && request.resource.data.get('completedJobs', 0) == 0;
+      // Owner edits profile fields; may move a rejected profile back to pending on resubmission.
+      allow update: if isSelf(uid)
+        && !changed().hasAny(['isVerified', 'avgRating', 'ratingSum', 'reviewCount', 'completedJobs',
+                               'isSuspended', 'verifiedAt', 'verifiedBy', 'rejectionReason'])
+        && (!changed().hasAny(['verificationStatus'])
+            || (resource.data.verificationStatus == 'rejected' && request.resource.data.verificationStatus == 'pending'));
+
+      // ID documents: owner and admins only.
+      match /private/{doc} {
+        allow read: if isSelf(uid) || isAdmin();
+        allow write: if isSelf(uid);
+      }
+    }
+
+    match /providerServices/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.providerId == request.auth.uid
+        && request.resource.data.basePriceCents is int && request.resource.data.basePriceCents >= 0;
+      allow update: if signedIn() && resource.data.providerId == request.auth.uid
+        && request.resource.data.providerId == request.auth.uid;
+      allow delete: if signedIn() && resource.data.providerId == request.auth.uid;
+    }
+
+    match /categories/{id} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    // ---------- Bookings ----------
+    match /bookings/{id} {
+      allow read: if isAdmin() || (signedIn() && (resource.data.clientId == request.auth.uid || resource.data.providerId == request.auth.uid));
+      allow create: if signedIn()
+        && request.resource.data.clientId == request.auth.uid
+        && request.resource.data.providerId != request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.serviceDate is timestamp
+        && request.resource.data.serviceDate > request.time
+        && !request.resource.data.keys().hasAny(['quotedFeeCents', 'paymentId', 'paymentStatus', 'slotLocked', 'completedAt'])
+        && get(/databases/$(database)/documents/providers/$(request.resource.data.providerId)).data.isVerified == true;
+      // Parties may only propose a reschedule; every other change goes through Cloud Functions.
+      allow update: if isParty(resource.data)
+        && onlyChanges(['rescheduleRequest', 'updatedAt'])
+        && request.resource.data.rescheduleRequest.requestedBy == request.auth.uid
+        && request.resource.data.rescheduleRequest.serviceDate > request.time
+        && resource.data.status in ['pending', 'awaiting_payment', 'confirmed'];
+      allow delete: if false;
+    }
+
+    // ---------- Money (read-only from the app) ----------
+    match /payments/{id} {
+      allow read: if isAdmin() || (signedIn() && (resource.data.payerId == request.auth.uid || resource.data.payeeId == request.auth.uid));
+      allow write: if false;
+    }
+    match /wallets/{uid} {
+      allow read: if isSelf(uid) || isAdmin();
+      allow write: if false;
+      match /transactions/{t} {
+        allow read: if isSelf(uid) || isAdmin();
+        allow write: if false;
+      }
+    }
+    match /withdrawals/{id} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow write: if false;
+    }
+
+    // ---------- Reviews ----------
+    // Document id must equal the booking id: one review per booking (FR-8.2).
+    match /reviews/{bookingId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && booking(bookingId).clientId == request.auth.uid
+        && booking(bookingId).status == 'closed'
+        && request.resource.data.bookingId == bookingId
+        && request.resource.data.clientId == request.auth.uid
+        && request.resource.data.providerId == booking(bookingId).providerId
+        && request.resource.data.rating is int
+        && request.resource.data.rating >= 1 && request.resource.data.rating <= 5
+        && request.resource.data.isHidden == false;
+      // Provider may reply once (FR-8.4).
+      allow update: if signedIn() && resource.data.providerId == request.auth.uid
+        && !('providerReply' in resource.data)
+        && onlyChanges(['providerReply', 'repliedAt']);
+      allow delete: if false;
+    }
+
+    // ---------- Photos ----------
+    // One document per photo. Anyone signed in can open a photo they hold the id of, but
+    // nobody can list them. Verification photos live in providers/{uid}/private instead.
+    match /images/{id} {
+      allow get: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['ownerId', 'data', 'createdAt'])
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.data is bytes
+        && request.resource.data.data.size() <= 1000000
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // ---------- Chat ----------
+    match /chats/{chatId} {
+      allow read: if isAdmin() || (signedIn() && request.auth.uid in resource.data.participants);
+      allow write: if false;
+      match /messages/{msgId} {
+        allow read: if isAdmin() || (signedIn() && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants);
+        allow create: if signedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.createdAt == request.time;
+        allow update: if signedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants
+          && resource.data.senderId != request.auth.uid
+          && onlyChanges(['readAt']);
+        allow delete: if false;
+      }
+    }
+
+    // ---------- Safety & disputes ----------
+    match /sosAlerts/{id} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.status == 'open'
+        && isParty(booking(request.resource.data.bookingId));
+      allow update, delete: if false;
+    }
+    match /disputes/{bookingId} {
+      allow read: if isAdmin() || isParty(booking(bookingId));
+      allow write: if false;
+    }
+
+    // ---------- Notifications ----------
+    match /notifications/{id} {
+      allow read: if signedIn() && resource.data.userId == request.auth.uid;
+      allow update: if signedIn() && resource.data.userId == request.auth.uid && onlyChanges(['isRead']);
+      allow create, delete: if false;
+    }
+
+    // ---------- Server / admin only ----------
+    match /{col}/{id} {
+      allow read: if isAdmin() && col in ['slots', 'revenue', 'auditLogs', 'smsQueue', 'reports'];
+    }
+  }
+}

@@ -1,0 +1,16 @@
+.dart_tool/
+build/
+.flutter-plugins*
+*.iml
+key.json
+**/GoogleService-Info.plist
+**/google-services.json
+
+# Local logs and environment files
+*.log
+**/.env
+**/.env.*
+!**/.env.example
+
+# Firebase client config. Recreate with: flutterfire configure
+app/lib/firebase_options.dart
