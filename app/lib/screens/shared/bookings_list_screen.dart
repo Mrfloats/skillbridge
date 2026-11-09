@@ -4,6 +4,7 @@ import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../models/models.dart';
 import '../../services/db.dart';
+import '../../widgets/app_drawer.dart';
 import '../../widgets/common.dart';
 import 'booking_detail_screen.dart';
 
@@ -19,6 +20,7 @@ class BookingsListScreen extends StatelessWidget {
       length: 2,
       child: Scaffold(
         appBar: AppBar(
+          leading: ShellMenu.button(context),
           title: Text(asProvider ? 'Jobs' : 'My bookings'),
           bottom: const PreferredSize(
             preferredSize: Size.fromHeight(58),
@@ -34,8 +36,7 @@ class BookingsListScreen extends StatelessWidget {
             if (snap.hasError) return EmptyState(icon: Icons.error_outline_rounded, title: 'Could not load bookings', message: '${snap.error}');
             if (!snap.hasData) return const SkeletonList();
             final all = snap.data!;
-            final active = all.where((b) => BookingStatus.active.contains(b.status)).toList()
-              ..sort((a, b) => a.serviceDate.compareTo(b.serviceDate));
+            final active = all.where((b) => BookingStatus.active.contains(b.status)).toList()..sort((a, b) => a.serviceDate.compareTo(b.serviceDate));
             final past = all.where((b) => !BookingStatus.active.contains(b.status)).toList();
             return TabBarView(children: [
               _List(bookings: active, user: user, asProvider: asProvider, emptyText: asProvider ? 'No active jobs. New requests appear here.' : 'No active bookings. Find a provider from Home.'),

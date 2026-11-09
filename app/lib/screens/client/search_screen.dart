@@ -57,6 +57,7 @@ class _SearchScreenState extends State<SearchScreen> {
         maxDistanceKm: _maxKm,
         minRating: _minRating,
         query: widget.query,
+        excludeUid: widget.user.uid,
       );
     });
   }

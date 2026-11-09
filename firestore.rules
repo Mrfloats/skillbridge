@@ -21,6 +21,11 @@ service cloud.firestore {
         && request.resource.data.isSuspended == false;
       allow update: if isSelf(uid)
         && !changed().hasAny(['role', 'isSuspended', 'email', 'createdAt'])
+        // Which side of the app is showing. Anyone can switch; provider mode needs a provider profile.
+        && (!changed().hasAny(['mode']) || request.resource.data.mode in ['client', 'provider'])
+        && (!changed().hasAny(['providerProfile'])
+            || exists(/databases/$(database)/documents/providers/$(uid))
+            || existsAfter(/databases/$(database)/documents/providers/$(uid)))
         // phoneVerified can only be set once the phone is actually linked to the account.
         && (!changed().hasAny(['phoneVerified']) || request.auth.token.phone_number != null);
       allow delete: if false;
@@ -72,7 +77,7 @@ service cloud.firestore {
         && request.resource.data.status == 'pending'
         && request.resource.data.serviceDate is timestamp
         && request.resource.data.serviceDate > request.time
-        && !request.resource.data.keys().hasAny(['quotedFeeCents', 'paymentId', 'paymentStatus', 'slotLocked', 'completedAt'])
+        && !request.resource.data.keys().hasAny(['quotedFeeCents', 'paymentId', 'paymentStatus', 'slotLocked', 'completedAt', 'clientRated'])
         && get(/databases/$(database)/documents/providers/$(request.resource.data.providerId)).data.isVerified == true;
       // Parties may only propose a reschedule; every other change goes through Cloud Functions.
       allow update: if isParty(resource.data)
@@ -119,6 +124,24 @@ service cloud.firestore {
         && !('providerReply' in resource.data)
         && onlyChanges(['providerReply', 'repliedAt']);
       allow delete: if false;
+    }
+
+    // Providers rate clients through the rateClient function (FR-8.5). Any signed-in user can
+    // see a client's average, so providers can check it before taking a job. Each rating is
+    // visible only to the provider who gave it and to admins.
+    match /clientRatings/{uid} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+    match /clientReviews/{bookingId} {
+      allow read: if isAdmin() || (signedIn() && resource.data.providerId == request.auth.uid);
+      allow write: if false;
+    }
+
+    // Messages to the support team, sent and closed through Cloud Functions.
+    match /supportTickets/{id} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow write: if false;
     }
 
     // ---------- Photos ----------

@@ -5,6 +5,21 @@ class AppConfig {
   static const functionsRegion = 'europe-west1';
   static const currencySymbol = 'US\$';
   static const maxTrustedContacts = 3;
+  static const supportEmail = 'support@skillbridge.app';
+
+  /// Zimbabwe emergency numbers, shown on the Safety page. Check these before launch.
+  static const emergencyNumbers = [
+    ('Police', '995'),
+    ('Ambulance', '994'),
+    ('Fire brigade', '993'),
+    ('All emergencies', '999'),
+  ];
+
+  /// Share of each job charged to the provider's balance. Must match functions/src/config.ts.
+  static const commissionRate = 0.1;
+
+  /// Smallest balance top-up, in cents. Must match functions/src/config.ts.
+  static const minTopUpCents = 100;
   static const defaultSearchRadiusKm = 15.0;
 
   /// Harare city centre, used when location permission is denied.
@@ -24,6 +39,8 @@ class AppConfig {
 /// Booking statuses, matching functions/src/config.ts.
 class BookingStatus {
   static const pending = 'pending';
+
+  /// A quote is waiting for the client to accept it. The stored value predates direct payment.
   static const awaitingPayment = 'awaiting_payment';
   static const confirmed = 'confirmed';
   static const inTransit = 'in_transit';

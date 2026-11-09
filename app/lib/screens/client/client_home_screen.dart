@@ -4,6 +4,7 @@ import '../../core/constants.dart';
 import '../../core/theme.dart';
 import '../../models/models.dart';
 import '../../services/db.dart';
+import '../../widgets/app_drawer.dart';
 import '../../widgets/common.dart';
 import '../shared/booking_detail_screen.dart';
 import '../shared/bookings_list_screen.dart';
@@ -25,6 +26,7 @@ class ClientHomeScreen extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 68),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
+              if (ShellMenu.button(context, onHero: true) case final menu?) ...[menu, const SizedBox(width: 10)],
               const Reveal(child: BrandLogo(height: 40)),
               const Spacer(),
               IconButton(

@@ -58,19 +58,22 @@ Future<bool> confirmDialog(BuildContext context, String title, String body, {Str
   return r == true;
 }
 
-Future<String?> textPrompt(BuildContext context, String title, {String hint = '', String ok = 'Submit', int minLength = 0, TextInputType? keyboard}) {
+Future<String?> textPrompt(BuildContext context, String title, {String? message, String hint = '', String ok = 'Submit', int minLength = 0, TextInputType? keyboard}) {
   final ctrl = TextEditingController();
   return showAppDialog<String>(
     context: context,
     builder: (ctx) => AlertDialog(
       title: Text(title),
-      content: TextField(
-        controller: ctrl,
-        autofocus: true,
-        keyboardType: keyboard,
-        maxLines: keyboard == null ? 3 : 1,
-        decoration: InputDecoration(hintText: hint),
-      ),
+      content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (message != null) ...[Text(message), const SizedBox(height: 12)],
+        TextField(
+          controller: ctrl,
+          autofocus: true,
+          keyboardType: keyboard,
+          maxLines: keyboard == null ? 3 : 1,
+          decoration: InputDecoration(hintText: hint),
+        ),
+      ]),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
         FilledButton(

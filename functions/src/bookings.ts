@@ -3,7 +3,7 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { onDocumentCreated, onDocumentUpdated } from "firebase-functions/v2/firestore";
 import { FieldValue, Timestamp, Transaction } from "firebase-admin/firestore";
 import { logger } from "firebase-functions";
-import { CONFIG, BOOKING_STATUS as S } from "./config";
+import { CONFIG, BOOKING_STATUS as S, commissionOn } from "./config";
 import { db, requireAuth, requireAdmin, slotId, walletEntry, audit, notify, getBooking, hoursAgo } from "./helpers";
 
 const REGION = "europe-west1";
@@ -20,11 +20,39 @@ function freeSlot(tx: Transaction, b: FirebaseFirestore.DocumentData) {
   if (b.slotLocked) tx.delete(db().collection("slots").doc(slotId(b.providerId, b.serviceDate, b.timeSlot)));
 }
 
-/** Release held funds to the provider, minus commission (FR-6.3, FR-6.5). */
+/**
+ * Closes a job the client paid for directly: charges the provider's prepaid balance.
+ * The balance may go below zero here, because the work is already done. A provider
+ * in that position can't send new quotes until they top up.
+ */
+export function chargeCommission(tx: Transaction, bookingRef: FirebaseFirestore.DocumentReference, b: FirebaseFirestore.DocumentData, jobValueCents?: number) {
+  const commission = commissionOn(jobValueCents ?? b.quotedFeeCents);
+  if (commission > 0) {
+    walletEntry(tx, b.providerId, -commission, "commission", bookingRef.id, `Service charge for ${b.serviceTitle}`);
+    tx.create(db().collection("revenue").doc(), {
+      bookingId: bookingRef.id,
+      commissionCents: commission,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+  }
+  tx.update(bookingRef, { ...stamp(S.closed), commissionCents: commission });
+  tx.update(db().collection("providers").doc(b.providerId), { completedJobs: FieldValue.increment(1) });
+}
+
+/** Closes a finished job, however it was paid for. */
+function closeJob(tx: Transaction, bookingRef: FirebaseFirestore.DocumentReference, b: FirebaseFirestore.DocumentData) {
+  if (b.paymentStatus === "held") releaseEscrow(tx, bookingRef, b);
+  else chargeCommission(tx, bookingRef, b);
+}
+
+/**
+ * Bookings paid before the move to direct payment still have money in escrow.
+ * This settles them: held funds go to the provider, minus commission (FR-6.3, FR-6.5).
+ */
 export function releaseEscrow(tx: Transaction, bookingRef: FirebaseFirestore.DocumentReference, b: FirebaseFirestore.DocumentData, providerShareCents?: number) {
   const fee: number = b.quotedFeeCents;
   const gross = providerShareCents ?? fee;
-  const commission = Math.round(gross * CONFIG.commissionRate);
+  const commission = commissionOn(gross);
   walletEntry(tx, b.providerId, gross - commission, "earning", bookingRef.id, `Payment for ${b.serviceTitle}`);
   tx.create(db().collection("revenue").doc(), {
     bookingId: bookingRef.id,
@@ -43,7 +71,7 @@ export function refundClient(tx: Transaction, bookingRef: FirebaseFirestore.Docu
   if (refundCents > 0) walletEntry(tx, b.clientId, refundCents, "refund", bookingRef.id, `Refund for ${b.serviceTitle}`);
   const toProvider = fee - refundCents;
   if (toProvider > 0) {
-    const commission = Math.round(toProvider * CONFIG.commissionRate);
+    const commission = commissionOn(toProvider);
     walletEntry(tx, b.providerId, toProvider - commission, "cancellation_fee", bookingRef.id, `Late cancellation fee`);
   }
   tx.update(db().collection("payments").doc(b.paymentId), { status: "refunded", updatedAt: FieldValue.serverTimestamp() });
@@ -62,11 +90,32 @@ export const respondToBooking = onCall({ region: REGION }, async (req) => {
       return;
     }
     if (!Number.isInteger(feeCents) || (feeCents as number) < 100) throw new HttpsError("invalid-argument", "Quote must be at least 1.00.");
+    const charge = commissionOn(feeCents as number);
+    const wallet = await tx.get(db().collection("wallets").doc(uid));
+    if ((wallet.get("balanceCents") ?? 0) < charge) {
+      throw new HttpsError(
+        "failed-precondition",
+        `Your balance is too low. The service charge on this quote is ${(charge / 100).toFixed(2)}. Top up in your wallet, then send it again.`,
+      );
+    }
     const lockRef = db().collection("slots").doc(slotId(b.providerId, b.serviceDate, b.timeSlot));
     const lock = await tx.get(lockRef);
     if (lock.exists) throw new HttpsError("already-exists", "You already have a booking in this time slot.");
     tx.create(lockRef, { bookingId, providerId: uid, createdAt: FieldValue.serverTimestamp() });
     tx.update(ref, { ...stamp(S.awaitingPayment), quotedFeeCents: feeCents, slotLocked: true, acceptedAt: FieldValue.serverTimestamp() });
+  });
+  return { ok: true };
+});
+
+/** Client accepts the quote. They pay the provider directly, so no money moves here. */
+export const acceptQuote = onCall({ region: REGION }, async (req) => {
+  const uid = requireAuth(req);
+  const { bookingId } = req.data as { bookingId: string };
+  await db().runTransaction(async (tx) => {
+    const { ref, data: b } = await getBooking(tx, bookingId);
+    if (b.clientId !== uid) throw new HttpsError("permission-denied", "Not your booking.");
+    if (b.status !== S.awaitingPayment) throw new HttpsError("failed-precondition", "This quote is no longer open.");
+    tx.update(ref, stamp(S.confirmed));
   });
   return { ok: true };
 });
@@ -90,15 +139,15 @@ export const updateJobStatus = onCall({ region: REGION }, async (req) => {
   return { ok: true };
 });
 
-/** Client confirms the work is done; funds are released (FR-6.3). */
+/** Client confirms the work is done; the job closes (FR-6.3). */
 export const confirmCompletion = onCall({ region: REGION }, async (req) => {
   const uid = requireAuth(req);
   const { bookingId } = req.data as { bookingId: string };
   await db().runTransaction(async (tx) => {
     const { ref, data: b } = await getBooking(tx, bookingId);
     if (b.clientId !== uid) throw new HttpsError("permission-denied", "Not your booking.");
-    if (b.status !== S.completed || b.paymentStatus !== "held") throw new HttpsError("failed-precondition", "Job is not awaiting confirmation.");
-    releaseEscrow(tx, ref, b);
+    if (b.status !== S.completed) throw new HttpsError("failed-precondition", "Job is not awaiting confirmation.");
+    closeJob(tx, ref, b);
     freeSlot(tx, b);
   });
   return { ok: true };
@@ -113,7 +162,7 @@ export const raiseDispute = onCall({ region: REGION }, async (req) => {
     const { ref, data: b } = await getBooking(tx, bookingId);
     if (b.clientId !== uid && b.providerId !== uid) throw new HttpsError("permission-denied", "Not your booking.");
     const disputable = [S.confirmed, S.inTransit, S.inProgress, S.completed];
-    if (!disputable.includes(b.status) || b.paymentStatus !== "held") throw new HttpsError("failed-precondition", "This booking cannot be disputed.");
+    if (!disputable.includes(b.status)) throw new HttpsError("failed-precondition", "This booking cannot be disputed.");
     tx.create(db().collection("disputes").doc(bookingId), {
       bookingId,
       raisedBy: uid,
@@ -127,7 +176,11 @@ export const raiseDispute = onCall({ region: REGION }, async (req) => {
   return { ok: true };
 });
 
-/** Admin settles a dispute: release, refund or split (FR-12.3). */
+/**
+ * Admin settles a dispute (FR-12.3). On a directly paid job, "release" charges the provider in full,
+ * "refund" cancels with no charge, and "split" charges on the given share of the quote. The admin
+ * can't move the job money itself. On an escrow booking these outcomes also pay out the held funds.
+ */
 export const resolveDispute = onCall({ region: REGION }, async (req) => {
   const adminId = requireAdmin(req);
   const { bookingId, outcome, providerPercent, note } = req.data as {
@@ -137,14 +190,17 @@ export const resolveDispute = onCall({ region: REGION }, async (req) => {
     const { ref, data: b } = await getBooking(tx, bookingId);
     if (b.status !== S.disputed) throw new HttpsError("failed-precondition", "Booking is not disputed.");
     const fee: number = b.quotedFeeCents;
+    const escrow = b.paymentStatus === "held";
     if (outcome === "release") {
-      releaseEscrow(tx, ref, b);
+      closeJob(tx, ref, b);
     } else if (outcome === "refund") {
-      refundClient(tx, ref, b, fee);
-      tx.update(ref, { ...stamp(S.cancelled), paymentStatus: "refunded" });
+      if (escrow) refundClient(tx, ref, b, fee);
+      tx.update(ref, { ...stamp(S.cancelled), ...(escrow ? { paymentStatus: "refunded" } : {}) });
     } else {
       const pct = Math.max(0, Math.min(100, providerPercent ?? 50));
-      releaseEscrow(tx, ref, b, Math.round((fee * pct) / 100));
+      const share = Math.round((fee * pct) / 100);
+      if (escrow) releaseEscrow(tx, ref, b, share);
+      else chargeCommission(tx, ref, b, share);
     }
     freeSlot(tx, b);
     tx.update(db().collection("disputes").doc(bookingId), {
@@ -213,7 +269,7 @@ export const respondToReschedule = onCall({ region: REGION }, async (req) => {
   return { ok: true };
 });
 
-/** Hourly: auto-release escrow, expire stale requests and unpaid quotes (FR-5.4, FR-6.4). */
+/** Hourly: close unconfirmed finished jobs, expire stale requests and unanswered quotes (FR-5.4, FR-6.4). */
 export const bookingHousekeeping = onSchedule({ schedule: "every 60 minutes", region: REGION }, async () => {
   const col = db().collection("bookings");
 
@@ -221,8 +277,8 @@ export const bookingHousekeeping = onSchedule({ schedule: "every 60 minutes", re
   for (const doc of toRelease.docs) {
     await db().runTransaction(async (tx) => {
       const { ref, data: b } = await getBooking(tx, doc.id);
-      if (b.status === S.completed && b.paymentStatus === "held") {
-        releaseEscrow(tx, ref, b);
+      if (b.status === S.completed) {
+        closeJob(tx, ref, b);
         freeSlot(tx, b);
       }
     });
@@ -237,7 +293,7 @@ export const bookingHousekeeping = onSchedule({ schedule: "every 60 minutes", re
       const { ref, data: b } = await getBooking(tx, doc.id);
       if (b.status !== S.awaitingPayment) return;
       freeSlot(tx, b);
-      tx.update(ref, { ...stamp(S.cancelled), cancelReason: "Quote not paid in time" });
+      tx.update(ref, { ...stamp(S.cancelled), cancelReason: "Quote not accepted in time" });
     });
   }
   logger.info("Housekeeping", { released: toRelease.size, expired: stalePending.size, unpaid: unpaid.size });
@@ -262,14 +318,14 @@ export const onBookingCreated = onDocumentCreated({ document: "bookings/{id}", r
 });
 
 const STATUS_MESSAGES: Record<string, [to: "client" | "provider" | "both", text: string]> = {
-  [S.awaitingPayment]: ["client", "Your request was accepted. Pay to confirm."],
+  [S.awaitingPayment]: ["client", "You have a quote. Accept it to confirm the booking."],
   [S.declined]: ["client", "The provider declined your request."],
   [S.expired]: ["client", "Your request expired with no response."],
-  [S.confirmed]: ["both", "Booking confirmed and paid."],
+  [S.confirmed]: ["both", "Booking confirmed."],
   [S.inTransit]: ["client", "Your provider is on the way."],
   [S.inProgress]: ["client", "Your provider has started the job."],
   [S.completed]: ["client", "Job marked complete. Please confirm and rate."],
-  [S.closed]: ["provider", "Payment released to your wallet."],
+  [S.closed]: ["provider", "Job closed. See your wallet for the details."],
   [S.cancelled]: ["both", "Booking cancelled."],
   [S.disputed]: ["both", "A dispute was raised. An admin will review it."],
 };

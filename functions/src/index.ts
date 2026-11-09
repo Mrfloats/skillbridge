@@ -7,3 +7,4 @@ setGlobalOptions({ maxInstances: 10 });
 export * from "./bookings";
 export * from "./payments";
 export * from "./trust";
+export * from "./account";

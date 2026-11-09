@@ -25,6 +25,17 @@ class AppUser {
   final List<TrustedContact> trustedContacts;
   final DateTime? createdAt;
 
+  /// Whether new booking requests carry the client's GPS location. On unless they turn it off.
+  final bool shareLocation;
+
+  /// Whether the user has a provider profile. Accounts that signed up as providers always do;
+  /// clients get one the first time they switch to provider mode.
+  final bool hasProviderProfile;
+
+  /// The side of the app the user last chose in the side menu: 'client' or 'provider'.
+  /// Null until they first switch, when it follows the role they signed up with.
+  final String? mode;
+
   AppUser({
     required this.uid,
     required this.fullName,
@@ -36,7 +47,13 @@ class AppUser {
     this.phoneVerified = false,
     this.trustedContacts = const [],
     this.createdAt,
-  });
+    this.shareLocation = true,
+    bool hasProviderProfile = false,
+    this.mode,
+  }) : hasProviderProfile = hasProviderProfile || role == 'provider';
+
+  /// Whether the provider side of the app is showing. Admins have their own console.
+  bool get inProviderMode => role != 'admin' && hasProviderProfile && (mode ?? role) == 'provider';
 
   factory AppUser.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
     final m = d.data() ?? {};
@@ -53,6 +70,9 @@ class AppUser {
           .map((e) => TrustedContact.fromMap(Map<String, dynamic>.from(e as Map)))
           .toList(),
       createdAt: _dt(m['createdAt']),
+      shareLocation: m['shareLocation'] != false,
+      hasProviderProfile: m['providerProfile'] == true,
+      mode: m['mode'] as String?,
     );
   }
 }
@@ -79,6 +99,10 @@ class ProviderProfile {
   final int completedJobs;
   final List<String> portfolioUrls;
 
+  /// Whether clients see the area the provider typed as their base. On unless they turn it off.
+  /// Clients always see the distance, never the exact base location.
+  final bool showArea;
+
   ProviderProfile({
     required this.uid,
     required this.fullName,
@@ -100,6 +124,7 @@ class ProviderProfile {
     this.reviewCount = 0,
     this.completedJobs = 0,
     this.portfolioUrls = const [],
+    this.showArea = true,
   });
 
   factory ProviderProfile.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
@@ -125,6 +150,7 @@ class ProviderProfile {
       reviewCount: _int(m['reviewCount']),
       completedJobs: _int(m['completedJobs']),
       portfolioUrls: _strings(m['portfolioUrls']),
+      showArea: m['showArea'] != false,
     );
   }
 
@@ -228,6 +254,9 @@ class Booking {
   final String paymentStatus;
   final String? paymentId;
   final bool reviewed;
+
+  /// Whether the provider has rated the client for this job (FR-8.5).
+  final bool clientRated;
   final RescheduleRequest? reschedule;
   final List<TimelineEntry> timeline;
   final DateTime? createdAt;
@@ -256,6 +285,7 @@ class Booking {
     this.paymentStatus = 'none',
     this.paymentId,
     this.reviewed = false,
+    this.clientRated = false,
     this.reschedule,
     this.timeline = const [],
     this.createdAt,
@@ -288,6 +318,7 @@ class Booking {
       paymentStatus: m['paymentStatus'] ?? 'none',
       paymentId: m['paymentId'],
       reviewed: m['reviewed'] == true,
+      clientRated: m['clientRated'] == true,
       reschedule: r is Map
           ? RescheduleRequest(r['requestedBy'] ?? '', _dt(r['serviceDate']) ?? DateTime.now(), r['timeSlot'] ?? '')
           : null,
@@ -299,6 +330,9 @@ class Booking {
     );
   }
 }
+
+/// A user's average rating and how many reviews it comes from.
+typedef RatingSummary = ({double average, int count});
 
 class Review {
   final String id;
@@ -433,6 +467,28 @@ class Dispute {
     return Dispute(d.id, m['bookingId'] ?? d.id, m['raisedBy'] ?? '', m['reason'] ?? '', m['status'] ?? 'open',
         m['outcome'], _dt(m['createdAt']));
   }
+}
+
+/// A message to the support team, and how it ended.
+class SupportTicket {
+  final String id;
+  final String userId;
+  final String userName;
+  final String email;
+  final String phone;
+  final String role;
+  final String topic;
+  final String message;
+  final String status;
+  final String reply;
+  final DateTime? createdAt;
+  SupportTicket(this.id, this.userId, this.userName, this.email, this.phone, this.role, this.topic, this.message, this.status, this.reply, this.createdAt);
+  factory SupportTicket.fromDoc(DocumentSnapshot<Map<String, dynamic>> d) {
+    final m = d.data() ?? {};
+    return SupportTicket(d.id, m['userId'] ?? '', m['userName'] ?? '', m['email'] ?? '', m['phone'] ?? '', m['role'] ?? '', m['topic'] ?? 'other',
+        m['message'] ?? '', m['status'] ?? 'open', m['reply'] ?? '', _dt(m['createdAt']));
+  }
+  bool get isOpen => status == 'open';
 }
 
 class AppNotification {

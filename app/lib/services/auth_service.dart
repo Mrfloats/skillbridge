@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 import '../core/constants.dart';
 import '../core/format.dart';
+import '../models/models.dart';
 
 /// Registration, login, and email or phone verification (FR-1.1 – FR-1.5).
 class AuthService {
@@ -38,10 +39,21 @@ class AuthService {
       'fcmTokens': [],
       'createdAt': FieldValue.serverTimestamp(),
     });
-    if (role == Roles.provider) {
-      batch.set(_db.collection('providers').doc(user.uid), {
-        'fullName': fullName.trim(),
-        'phone': toE164(phone),
+    if (role == Roles.provider) batch.set(_db.collection('providers').doc(user.uid), _newProviderProfile(fullName.trim(), toE164(phone)));
+    try {
+      await batch.commit();
+    } catch (_) {
+      await user.delete().catchError((_) {});
+      rethrow;
+    }
+    // The verify screen offers a resend, so a failed send must not fail the sign-up.
+    await user.sendEmailVerification().catchError((_) {});
+  }
+
+  /// A new, unverified provider profile. The Firestore rules only accept it in this state.
+  static Map<String, dynamic> _newProviderProfile(String fullName, String phone) => {
+        'fullName': fullName,
+        'phone': phone,
         'bio': '',
         'experienceYears': 0,
         'categoryIds': [],
@@ -57,16 +69,18 @@ class AuthService {
         'completedJobs': 0,
         'portfolioUrls': [],
         'createdAt': FieldValue.serverTimestamp(),
-      });
-    }
-    try {
-      await batch.commit();
-    } catch (_) {
-      await user.delete().catchError((_) {});
-      rethrow;
-    }
-    // The verify screen offers a resend, so a failed send must not fail the sign-up.
-    await user.sendEmailVerification().catchError((_) {});
+      };
+
+  /// Shows the client or provider side of the app (side menu → mode switch).
+  Future<void> setMode(String uid, String mode) => _db.collection('users').doc(uid).update({'mode': mode});
+
+  /// Gives a client a provider profile and switches them to provider mode, in one step.
+  /// They then set up their services and verify their ID before they can take jobs.
+  Future<void> becomeProvider(AppUser user) async {
+    final batch = _db.batch();
+    batch.set(_db.collection('providers').doc(user.uid), _newProviderProfile(user.fullName, user.phone));
+    batch.update(_db.collection('users').doc(user.uid), {'providerProfile': true, 'mode': Roles.provider});
+    await batch.commit();
   }
 
   Future<void> login(String email, String password) =>
@@ -75,6 +89,16 @@ class AuthService {
   Future<void> resetPassword(String email) => _auth.sendPasswordResetEmail(email: email.trim());
 
   Future<void> logout() => _auth.signOut();
+
+  /// Checks the password again before something that can't be undone, such as deleting the account.
+  Future<void> confirmPassword(String password) async {
+    final user = _auth.currentUser!;
+    try {
+      await user.reauthenticateWithCredential(EmailAuthProvider.credential(email: user.email ?? '', password: password));
+    } on FirebaseAuthException catch (e) {
+      throw Exception(e.code == 'invalid-credential' || e.code == 'wrong-password' ? 'That password is not correct.' : friendlyAuthError(e));
+    }
+  }
 
   bool get emailVerified => _auth.currentUser?.emailVerified ?? false;
 

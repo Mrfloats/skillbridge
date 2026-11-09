@@ -100,7 +100,9 @@ class ProviderDetailScreen extends StatelessWidget {
                 index: 3,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Text('${p.workingHours}\nBased in ${p.baseAddress.isEmpty ? 'Harare' : p.baseAddress} · covers ${p.serviceRadiusKm.round()} km'),
+                  child: Text(p.showArea
+                      ? '${p.workingHours}\nBased in ${p.baseAddress.isEmpty ? 'Harare' : p.baseAddress} · covers ${p.serviceRadiusKm.round()} km'
+                      : '${p.workingHours}\nCovers ${p.serviceRadiusKm.round()} km'),
                 ),
               ),
               const SectionTitle('Services'),

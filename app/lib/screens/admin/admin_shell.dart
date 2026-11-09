@@ -10,6 +10,7 @@ import '../../services/db.dart';
 import '../../services/device_services.dart';
 import '../../widgets/common.dart';
 import '../shared/booking_detail_screen.dart';
+import '../shared/support_screen.dart';
 import 'verification_review_screen.dart';
 
 /// Admin console: verification, SOS, disputes, payouts, users, reports (FR-12).
@@ -20,7 +21,7 @@ class AdminShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 6,
+      length: 7,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('SkillBridge Admin'),
@@ -30,6 +31,7 @@ class AdminShell extends StatelessWidget {
             Tab(child: _CountLabel('Verify', Db.instance.pendingProviders().map((l) => l.length))),
             Tab(child: _CountLabel('Disputes', Db.instance.openDisputes().map((l) => l.length))),
             Tab(child: _CountLabel('Payouts', Db.instance.pendingWithdrawals().map((l) => l.length))),
+            Tab(child: _CountLabel('Support', Db.instance.openSupportTickets().map((l) => l.length))),
             const Tab(text: 'Users'),
             const Tab(text: 'Reports'),
           ]),
@@ -39,6 +41,7 @@ class AdminShell extends StatelessWidget {
           _VerifyTab(admin: user),
           _DisputesTab(admin: user),
           const _PayoutsTab(),
+          const _SupportTab(),
           const _UsersTab(),
           const _ReportsTab(),
         ]),
@@ -187,18 +190,22 @@ class _DisputesTab extends StatelessWidget {
             const SizedBox(height: 12),
             SegmentedButton<String>(
               segments: const [
-                ButtonSegment(value: 'release', label: Text('Pay provider')),
-                ButtonSegment(value: 'refund', label: Text('Refund client')),
-                ButtonSegment(value: 'split', label: Text('Split')),
+                ButtonSegment(value: 'release', label: Text('Job done')),
+                ButtonSegment(value: 'refund', label: Text('Not done')),
+                ButtonSegment(value: 'split', label: Text('Part done')),
               ],
               selected: {outcome},
               onSelectionChanged: (s) => setS(() => outcome = s.first),
             ),
-            if (outcome == 'split') ...[
-              const SizedBox(height: 12),
-              Text('Provider gets ${percent.round()}%, client gets ${100 - percent.round()}%'),
-              Slider(value: percent, min: 0, max: 100, divisions: 20, onChanged: (v) => setS(() => percent = v)),
-            ],
+            const SizedBox(height: 12),
+            Text(switch (outcome) {
+              'release' => 'The job closes and the provider pays the full service charge.',
+              'refund' => 'The booking is cancelled with no service charge.',
+              _ => 'The job closes and the provider pays the service charge on ${percent.round()}% of the quote.',
+            }),
+            if (outcome == 'split') Slider(value: percent, min: 0, max: 100, divisions: 20, onChanged: (v) => setS(() => percent = v)),
+            const SizedBox(height: 4),
+            Text('Clients pay providers directly, so any refund has to be agreed between them.', style: Theme.of(ctx).textTheme.bodySmall),
             const SizedBox(height: 12),
             TextField(controller: note, maxLines: 3, decoration: const InputDecoration(labelText: 'Decision note (shared in audit log)')),
             const SizedBox(height: 16),
@@ -329,6 +336,51 @@ class _PayoutsTab extends StatelessWidget {
   }
 }
 
+// ---------------- Support ----------------
+class _SupportTab extends StatelessWidget {
+  const _SupportTab();
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<List<SupportTicket>>(
+      stream: Db.instance.openSupportTickets(),
+      builder: (context, snap) {
+        if (snap.hasError) return EmptyState(icon: Icons.error_outline_rounded, title: 'Could not load messages', message: '${snap.error}');
+        if (!snap.hasData) return const Loading();
+        final list = snap.data!;
+        if (list.isEmpty) return const EmptyState(icon: Icons.support_agent_rounded, title: 'No open support messages');
+        return ListView.separated(
+          padding: const EdgeInsets.only(bottom: 24),
+          itemCount: list.length,
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (_, i) {
+            final tk = list[i];
+            return ListTile(
+              title: Text('${tk.userName} · ${supportTopics[tk.topic] ?? tk.topic}'),
+              subtitle: Text('${tk.message}\n${tk.role} · ${tk.phone} · ${tk.email}\n${fmtDateTime(tk.createdAt)}'),
+              isThreeLine: true,
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                if (tk.phone.isNotEmpty)
+                  IconButton(icon: const Icon(Icons.call_outlined), tooltip: 'Call', onPressed: () => launchUrl(Uri(scheme: 'tel', path: tk.phone))),
+                IconButton(
+                  icon: const Icon(Icons.task_alt_rounded),
+                  tooltip: 'Close',
+                  onPressed: () async {
+                    final note = await textPrompt(context, 'Close this message',
+                        message: 'Optional: a short note for ${tk.userName.split(' ').first}. They get it as a notification.', hint: 'What you did', ok: 'Close');
+                    if (note != null && context.mounted) {
+                      await runGuarded(context, () => Api.instance.resolveSupportTicket(tk.id, note: note), success: 'Message closed');
+                    }
+                  },
+                ),
+              ]),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
 // ---------------- Users ----------------
 class _UsersTab extends StatefulWidget {
   const _UsersTab();
@@ -366,15 +418,16 @@ class _UsersTabState extends State<_UsersTab> {
                 return ListTile(
                   leading: Avatar(url: u.photoUrl, name: u.fullName),
                   title: Text(u.fullName),
-                  subtitle: Text('${u.role} · ${u.phone}\n${u.email}'),
+                  subtitle: Text('${u.role == 'client' && u.hasProviderProfile ? 'client + provider' : u.role} · ${u.phone}\n${u.email}'),
                   isThreeLine: true,
                   trailing: u.role == 'admin'
                       ? const Chip(label: Text('Admin'))
                       : Switch(
                           value: !u.isSuspended,
                           onChanged: (active) async {
-                            final ok = await confirmDialog(context, active ? 'Reactivate ${u.fullName}?' : 'Suspend ${u.fullName}?',
-                                active ? 'They will be able to log in again.' : 'They will be logged out and blocked.', danger: !active);
+                            final ok = await confirmDialog(
+                                context, active ? 'Reactivate ${u.fullName}?' : 'Suspend ${u.fullName}?', active ? 'They will be able to log in again.' : 'They will be logged out and blocked.',
+                                danger: !active);
                             if (!ok || !context.mounted) return;
                             await runGuarded(context, () => Api.instance.setUserSuspended(u.uid, !active));
                             setState(() => _results = Db.instance.searchUsers(''));
@@ -444,8 +497,7 @@ class _ReportsTabState extends State<_ReportsTab> {
         },
       ),
       const SizedBox(height: 16),
-      Text('Revenue is commission on released payments. Server timestamps are used for all dates.',
-          style: Theme.of(context).textTheme.bodySmall),
+      Text('Revenue is the service charge on closed jobs. Server timestamps are used for all dates.', style: Theme.of(context).textTheme.bodySmall),
       const SizedBox(height: 4),
       Text('Live data from Firestore at ${fmtDateTime(Timestamp.now().toDate())}.', style: Theme.of(context).textTheme.bodySmall),
     ]);

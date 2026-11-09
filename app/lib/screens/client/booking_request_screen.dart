@@ -51,15 +51,23 @@ class _BookingRequestScreenState extends State<BookingRequestScreen> {
     }
   }
 
-  Future<void> _useMyLocation() async {
+  @override
+  void initState() {
+    super.initState();
+    // With location sharing on (Settings), attach it straight away. Quietly, since the
+    // address alone is enough and the button below lets them try again.
+    if (widget.user.shareLocation) _useMyLocation(quiet: true);
+  }
+
+  Future<void> _useMyLocation({bool quiet = false}) async {
     final loc = await LocationService.instance.current();
     if (!mounted) return;
     if (loc == null) {
-      showSnack(context, 'Turn on location to share it, or type your address.', error: true);
+      if (!quiet) showSnack(context, 'Turn on location to share it, or type your address.', error: true);
       return;
     }
     setState(() => _location = loc);
-    showSnack(context, 'Location attached to your request');
+    if (!quiet) showSnack(context, 'Location attached to your request');
   }
 
   Future<void> _addPhoto() async {
@@ -150,11 +158,17 @@ class _BookingRequestScreenState extends State<BookingRequestScreen> {
             decoration: const InputDecoration(labelText: 'Address', hintText: 'e.g. 12 Fife Ave, Avondale'),
             validator: (v) => (v ?? '').trim().length >= 5 ? null : 'Enter the job address',
           ),
-          TextButton.icon(
-            onPressed: _useMyLocation,
-            icon: Icon(_location == null ? Icons.my_location : Icons.check_circle),
-            label: Text(_location == null ? 'Attach my current location' : 'Location attached'),
-          ),
+          if (widget.user.shareLocation)
+            TextButton.icon(
+              onPressed: _useMyLocation,
+              icon: Icon(_location == null ? Icons.my_location : Icons.check_circle),
+              label: Text(_location == null ? 'Attach my current location' : 'Location attached'),
+            )
+          else
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text('Location sharing is off, so only the address is sent. You can turn it on in Settings.', style: t.bodySmall),
+            ),
           const SizedBox(height: 12),
           Text('What needs doing', style: t.titleMedium),
           const SizedBox(height: 8),
@@ -166,12 +180,11 @@ class _BookingRequestScreenState extends State<BookingRequestScreen> {
           ),
           const SizedBox(height: 12),
           Wrap(spacing: 8, runSpacing: 8, children: [
-            for (var i = 0; i < _photos.length; i++)
-              Chip(label: Text('Photo ${i + 1}'), onDeleted: () => setState(() => _photos.removeAt(i))),
+            for (var i = 0; i < _photos.length; i++) Chip(label: Text('Photo ${i + 1}'), onDeleted: () => setState(() => _photos.removeAt(i))),
             if (_photos.length < 4) ActionChip(avatar: const Icon(Icons.add_a_photo, size: 18), label: const Text('Add photo'), onPressed: _addPhoto),
           ]),
           const SizedBox(height: 24),
-          Text('You pay only after the provider sends a quote and you accept it. Your money is held until the job is done.', style: t.bodySmall),
+          Text('The provider sends you a quote to accept. You then pay them directly, in cash or by mobile money.', style: t.bodySmall),
           const SizedBox(height: 12),
           GlowButton(label: 'Send request', busy: _busy, onPressed: _submit),
         ]),

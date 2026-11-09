@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -56,10 +54,49 @@ class BookingDetailScreen extends StatelessWidget {
   }
 }
 
+/// The client's rating from other providers, so a provider can see it before taking the job.
+class _ClientRating extends StatefulWidget {
+  final String clientId;
+  const _ClientRating({required this.clientId});
+  @override
+  State<_ClientRating> createState() => _ClientRatingState();
+}
+
+class _ClientRatingState extends State<_ClientRating> {
+  // Kept across rebuilds, so booking updates do not restart the listener.
+  late final _rating = Db.instance.clientRating(widget.clientId);
+
+  @override
+  Widget build(BuildContext context) {
+    final style = Theme.of(context).textTheme.bodySmall;
+    return StreamBuilder<RatingSummary?>(
+      stream: _rating,
+      builder: (context, snap) {
+        final r = snap.data;
+        if (r == null || r.count == 0) return Text(snap.connectionState == ConnectionState.waiting ? 'Client' : 'Client · no ratings yet', style: style);
+        return Row(children: [Text('Client · ', style: style), Flexible(child: RatingStars(r.average, count: r.count, size: 14))]);
+      },
+    );
+  }
+}
+
 class _Header extends StatelessWidget {
   final Booking booking;
   final bool isProvider;
   const _Header({required this.booking, required this.isProvider});
+
+  /// How the quote gets paid: the provider sees their charge, the client who to pay.
+  String? get _paymentNote {
+    final b = booking;
+    if (const [BookingStatus.cancelled, BookingStatus.declined, BookingStatus.expired].contains(b.status)) return null;
+    if (isProvider) {
+      final charge = money(b.commissionCents ?? commissionOn(b.quotedFeeCents!));
+      return b.status == BookingStatus.closed ? 'Service charge: $charge' : 'Service charge when the job closes: $charge';
+    }
+    final viaEscrow = const ['held', 'released', 'refunded'].contains(b.paymentStatus);
+    return viaEscrow ? null : 'Pay ${b.providerName.split(' ').first} directly. SkillBridge does not hold this money.';
+  }
+
   @override
   Widget build(BuildContext context) {
     final b = booking;
@@ -78,7 +115,7 @@ class _Header extends StatelessWidget {
                   Flexible(child: Text(name, style: t.titleMedium, overflow: TextOverflow.ellipsis)),
                   if (!isProvider) ...[const SizedBox(width: 4), const VerifiedBadge()],
                 ]),
-                Text(isProvider ? 'Client' : 'Your provider', style: t.bodySmall),
+                if (isProvider) _ClientRating(clientId: b.clientId) else Text('Your provider', style: t.bodySmall),
               ]),
             ),
             StatusChip(b.status),
@@ -100,6 +137,10 @@ class _Header extends StatelessWidget {
               if (b.paymentStatus == 'released') const Chip(label: Text('Paid out'), visualDensity: VisualDensity.compact),
               if (b.paymentStatus == 'refunded') const Chip(label: Text('Refunded'), visualDensity: VisualDensity.compact),
             ]),
+            if (_paymentNote != null) ...[
+              const SizedBox(height: 4),
+              Padding(padding: const EdgeInsets.only(left: 26), child: Text(_paymentNote!, style: t.bodySmall)),
+            ],
           ],
         ]),
       ),
@@ -194,13 +235,10 @@ class _Timeline extends StatelessWidget {
                         decoration: BoxDecoration(
                           color: statusColor(entries[i].status, Theme.of(context).colorScheme),
                           shape: BoxShape.circle,
-                          boxShadow: i == entries.length - 1
-                              ? [BoxShadow(color: statusColor(entries[i].status, Theme.of(context).colorScheme).withAlpha(90), spreadRadius: 4)]
-                              : null,
+                          boxShadow: i == entries.length - 1 ? [BoxShadow(color: statusColor(entries[i].status, Theme.of(context).colorScheme).withAlpha(90), spreadRadius: 4)] : null,
                         ),
                       ),
-                      if (i != entries.length - 1)
-                        Expanded(child: Container(width: 2, margin: const EdgeInsets.symmetric(vertical: 3), color: Theme.of(context).colorScheme.outlineVariant)),
+                      if (i != entries.length - 1) Expanded(child: Container(width: 2, margin: const EdgeInsets.symmetric(vertical: 3), color: Theme.of(context).colorScheme.outlineVariant)),
                     ]),
                   ),
                   const SizedBox(width: 10),
@@ -238,8 +276,7 @@ class _SosBanner extends StatelessWidget {
     if (!ok || !context.mounted) return;
     final loc = await LocationService.instance.current();
     if (!context.mounted) return;
-    await runGuarded(context, () => Db.instance.raiseSos(booking: booking, user: user, location: loc),
-        success: 'SOS sent. Help is being contacted. If in danger call 999 (police).');
+    await runGuarded(context, () => Db.instance.raiseSos(booking: booking, user: user, location: loc), success: 'SOS sent. Help is being contacted. If in danger call 999 (police).');
   }
 
   @override
@@ -309,7 +346,10 @@ class _Actions extends StatelessWidget {
   Booking get b => booking;
 
   Future<void> _accept(BuildContext context) async {
-    final input = await textPrompt(context, 'Your quote (${AppConfig.currencySymbol})', hint: 'e.g. 35.00', ok: 'Send quote',
+    final input = await textPrompt(context, 'Your quote (${AppConfig.currencySymbol})',
+        message: 'The client pays you directly. A $commissionLabel service charge comes off your balance when the job closes.',
+        hint: 'e.g. 35.00',
+        ok: 'Send quote',
         keyboard: const TextInputType.numberWithOptions(decimal: true));
     if (input == null || !context.mounted) return;
     final cents = parseMoneyToCents(input);
@@ -359,28 +399,30 @@ class _Actions extends StatelessWidget {
   }
 
   Future<void> _dispute(BuildContext context) async {
-    final reason = await textPrompt(context, 'Report a problem', hint: 'What went wrong? Payment stays on hold while an admin reviews it.', minLength: 10);
+    final reason = await textPrompt(context, 'Report a problem', hint: 'What went wrong? An admin will review it.', minLength: 10);
     if (reason == null || !context.mounted) return;
     await runGuarded(context, () => Api.instance.raiseDispute(b.id, reason), success: 'Dispute opened. An admin will contact you.');
   }
 
-  Future<void> _review(BuildContext context) async {
+  /// Asks for 1 to 5 stars, plus a comment when [comment] is given. Returns null if the user backs out.
+  Future<int?> _askStars(BuildContext context, String title, {TextEditingController? comment, String? note}) async {
     var rating = 5;
-    final comment = TextEditingController();
     final ok = await showAppDialog<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setD) => AlertDialog(
-          title: Text('Rate ${b.providerName.split(' ').first}'),
+          title: Text(title),
           content: Column(mainAxisSize: MainAxisSize.min, children: [
             Row(mainAxisAlignment: MainAxisAlignment.center, children: [
               for (var i = 1; i <= 5; i++)
                 IconButton(
                   icon: Icon(i <= rating ? Icons.star_rounded : Icons.star_outline_rounded, color: context.palette.star, size: 36),
+                  tooltip: '$i star${i == 1 ? '' : 's'}',
                   onPressed: () => setD(() => rating = i),
                 ),
             ]),
-            TextField(controller: comment, maxLines: 3, decoration: const InputDecoration(hintText: 'Tell others about the job (optional)')),
+            if (comment != null) TextField(controller: comment, maxLines: 3, decoration: const InputDecoration(hintText: 'Tell others about the job (optional)')),
+            if (note != null) Text(note, style: Theme.of(ctx).textTheme.bodySmall, textAlign: TextAlign.center),
           ]),
           actions: [
             TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Later')),
@@ -389,17 +431,27 @@ class _Actions extends StatelessWidget {
         ),
       ),
     );
-    if (ok != true || !context.mounted) return;
+    return ok == true ? rating : null;
+  }
+
+  Future<void> _review(BuildContext context) async {
+    final comment = TextEditingController();
+    final rating = await _askStars(context, 'Rate ${b.providerName.split(' ').first}', comment: comment);
+    if (rating == null || !context.mounted) return;
     await runGuarded(context, () => Db.instance.submitReview(b, user.fullName, rating, comment.text), success: 'Thanks for your review');
+  }
+
+  Future<void> _rateClient(BuildContext context) async {
+    final rating = await _askStars(context, 'Rate ${b.clientName.split(' ').first}', note: 'Other providers see the client\'s average rating, not who gave it.');
+    if (rating == null || !context.mounted) return;
+    await runGuarded(context, () => Api.instance.rateClient(b.id, rating), success: 'Thanks for rating your client');
   }
 
   @override
   Widget build(BuildContext context) {
     final buttons = <Widget>[];
-    void primary(String label, VoidCallback onTap, {IconData? icon}) =>
-        buttons.add(FilledButton.icon(onPressed: onTap, icon: Icon(icon ?? Icons.check), label: Text(label)));
-    void secondary(String label, VoidCallback onTap, {IconData? icon}) =>
-        buttons.add(OutlinedButton.icon(onPressed: onTap, icon: Icon(icon ?? Icons.more_horiz), label: Text(label)));
+    void primary(String label, VoidCallback onTap, {IconData? icon}) => buttons.add(FilledButton.icon(onPressed: onTap, icon: Icon(icon ?? Icons.check), label: Text(label)));
+    void secondary(String label, VoidCallback onTap, {IconData? icon}) => buttons.add(OutlinedButton.icon(onPressed: onTap, icon: Icon(icon ?? Icons.more_horiz), label: Text(label)));
     void danger(String label, VoidCallback onTap) => buttons.add(TextButton(
           onPressed: onTap,
           style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error, minimumSize: const Size.fromHeight(44)),
@@ -414,38 +466,38 @@ class _Actions extends StatelessWidget {
           primary('Accept & send quote', () => _accept(context), icon: Icons.request_quote);
           danger('Decline', () => runGuarded(context, () => Api.instance.respondToBooking(b.id, accept: false)));
         case BookingStatus.awaitingPayment:
-          buttons.add(const Text('Waiting for the client to pay. You will be notified.', textAlign: TextAlign.center));
+          buttons.add(const Text('Waiting for the client to accept your quote. You will be notified.', textAlign: TextAlign.center));
         case BookingStatus.confirmed:
           primary("I'm on my way", () => runGuarded(context, () => Api.instance.updateJobStatus(b.id, BookingStatus.inTransit)), icon: Icons.directions_car);
         case BookingStatus.inTransit:
           primary('Start job', () => runGuarded(context, () => Api.instance.updateJobStatus(b.id, BookingStatus.inProgress)), icon: Icons.play_arrow);
         case BookingStatus.inProgress:
           primary('Mark job complete', () async {
-            final ok = await confirmDialog(context, 'Job complete?', 'The client will be asked to confirm. Payment is released after they confirm, or automatically after 48 hours.');
+            final ok = await confirmDialog(context, 'Job complete?', 'The client will be asked to confirm. The job closes when they do, or automatically after 48 hours.');
             if (ok && context.mounted) await runGuarded(context, () => Api.instance.updateJobStatus(b.id, BookingStatus.completed));
           }, icon: Icons.task_alt);
         case BookingStatus.completed:
-          buttons.add(const Text('Waiting for client confirmation. Payment releases automatically after 48 hours.', textAlign: TextAlign.center));
+          buttons.add(const Text('Waiting for client confirmation. The job closes automatically after 48 hours.', textAlign: TextAlign.center));
+        case BookingStatus.closed:
+          if (!b.clientRated) primary('Rate ${b.clientName.split(' ').first}', () => _rateClient(context), icon: Icons.star);
       }
     } else {
       switch (b.status) {
         case BookingStatus.awaitingPayment:
-          primary('Pay ${money(b.quotedFeeCents ?? 0)}', () => showModalBottomSheet(
-                context: context,
-                isScrollControlled: true,
-                showDragHandle: true,
-                builder: (_) => PaySheet(booking: b, user: user),
-              ), icon: Icons.lock);
+          primary('Accept quote of ${money(b.quotedFeeCents ?? 0)}', () async {
+            final ok = await confirmDialog(context, 'Accept this quote?', 'You pay ${b.providerName} ${money(b.quotedFeeCents ?? 0)} directly. SkillBridge does not hold this money.', ok: 'Accept');
+            if (ok && context.mounted) await runGuarded(context, () => Api.instance.acceptQuote(b.id), success: 'Booking confirmed');
+          }, icon: Icons.handshake_outlined);
         case BookingStatus.completed:
-          primary('Confirm job done & release payment', () async {
-            final ok = await confirmDialog(context, 'Release payment?', '${money(b.quotedFeeCents ?? 0)} will be paid to ${b.providerName}. Only confirm if the work is finished.');
-            if (ok && context.mounted) await runGuarded(context, () => Api.instance.confirmCompletion(b.id), success: 'Payment released. Thank you!');
+          primary('Confirm job done', () async {
+            final ok = await confirmDialog(context, 'Is the job done?', 'Only confirm if the work is finished. This closes the booking.');
+            if (ok && context.mounted) await runGuarded(context, () => Api.instance.confirmCompletion(b.id), success: 'Job closed. Thank you!');
           }, icon: Icons.verified);
           secondary('Report a problem', () => _dispute(context), icon: Icons.report_problem_outlined);
         case BookingStatus.closed:
           if (!b.reviewed) primary('Rate this job', () => _review(context), icon: Icons.star);
       }
-      if ([BookingStatus.confirmed, BookingStatus.inTransit, BookingStatus.inProgress].contains(b.status) && b.paymentStatus == 'held') {
+      if ([BookingStatus.confirmed, BookingStatus.inTransit, BookingStatus.inProgress].contains(b.status)) {
         secondary('Report a problem', () => _dispute(context), icon: Icons.report_problem_outlined);
       }
     }
@@ -458,114 +510,5 @@ class _Actions extends StatelessWidget {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       for (final w in buttons) Padding(padding: const EdgeInsets.only(bottom: 8), child: w),
     ]);
-  }
-}
-
-/// PayNow checkout: EcoCash / OneMoney USSD push, or card via web (FR-6.1).
-class PaySheet extends StatefulWidget {
-  final Booking booking;
-  final AppUser user;
-  const PaySheet({super.key, required this.booking, required this.user});
-  @override
-  State<PaySheet> createState() => _PaySheetState();
-}
-
-class _PaySheetState extends State<PaySheet> {
-  String _method = 'ecocash';
-  late final TextEditingController _phone = TextEditingController(text: toLocalPhone(widget.user.phone));
-  bool _busy = false;
-  String? _instructions;
-  Timer? _poll;
-  int _polls = 0;
-
-  @override
-  void dispose() {
-    _poll?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _pay() async {
-    setState(() => _busy = true);
-    try {
-      final start = await Api.instance.initiatePayment(widget.booking.id, _method, _method == 'web' ? null : toLocalPhone(_phone.text));
-      if (start.redirectUrl != null) {
-        await launchUrl(Uri.parse(start.redirectUrl!), mode: LaunchMode.externalApplication);
-      }
-      setState(() => _instructions = start.instructions ?? 'Approve the payment on your phone. This page updates automatically.');
-      _poll = Timer.periodic(const Duration(seconds: 5), (t) async {
-        _polls++;
-        try {
-          final status = await Api.instance.checkPayment(start.paymentId);
-          if (!mounted) {
-            t.cancel();
-            return;
-          }
-          if (status == 'held') {
-            t.cancel();
-            final messenger = ScaffoldMessenger.of(context);
-            Navigator.pop(context);
-            messenger.showSnackBar(const SnackBar(content: Text('Payment received. Booking confirmed!')));
-          } else if (status == 'failed') {
-            t.cancel();
-            setState(() {
-              _busy = false;
-              _instructions = null;
-            });
-            showSnack(context, 'Payment was cancelled or failed. Try again.', error: true);
-          } else if (_polls > 36) {
-            t.cancel();
-            setState(() => _busy = false);
-          }
-        } catch (_) {}
-      });
-    } catch (e) {
-      if (mounted) {
-        setState(() => _busy = false);
-        showSnack(context, e.toString(), error: true);
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context).textTheme;
-    return Padding(
-      padding: EdgeInsets.fromLTRB(24, 0, 24, 24 + MediaQuery.of(context).viewInsets.bottom),
-      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Text('Pay ${money(widget.booking.quotedFeeCents ?? 0)}', style: t.headlineSmall?.copyWith(fontWeight: FontWeight.w700)),
-        const SizedBox(height: 4),
-        Text('Held by SkillBridge and released to ${widget.booking.providerName} only when the job is done.', style: t.bodySmall),
-        const SizedBox(height: 16),
-        if (_instructions == null) ...[
-          SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(value: 'ecocash', label: Text('EcoCash')),
-              ButtonSegment(value: 'onemoney', label: Text('OneMoney')),
-              ButtonSegment(value: 'web', label: Text('Card')),
-            ],
-            selected: {_method},
-            onSelectionChanged: (s) => setState(() => _method = s.first),
-          ),
-          const SizedBox(height: 16),
-          if (_method != 'web')
-            TextField(
-              controller: _phone,
-              keyboardType: TextInputType.phone,
-              decoration: const InputDecoration(labelText: 'Mobile money number', hintText: '0771234567'),
-            ),
-          const SizedBox(height: 16),
-          FilledButton(
-            onPressed: _busy ? null : _pay,
-            child: _busy ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Pay with PayNow'),
-          ),
-        ] else ...[
-          const Center(child: CircularProgressIndicator()),
-          const SizedBox(height: 16),
-          Text(_instructions!, textAlign: TextAlign.center),
-          const SizedBox(height: 8),
-          if (!_busy) TextButton(onPressed: () => setState(() => _instructions = null), child: const Text('Start again')),
-        ],
-      ]),
-    );
   }
 }

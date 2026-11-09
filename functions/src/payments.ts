@@ -20,25 +20,24 @@ function paynow() {
 const MOBILE_METHODS = ["ecocash", "onemoney", "innbucks"];
 
 /**
- * Starts a PayNow payment for an accepted quote (FR-6.1).
+ * Starts a PayNow payment that tops up a provider's prepaid balance.
  * Mobile money sends a USSD prompt to the phone; "web" returns a redirect URL for card payment.
  */
-export const initiatePayment = onCall({ region: REGION, secrets: [PAYNOW_ID, PAYNOW_KEY] }, async (req) => {
+export const startTopUp = onCall({ region: REGION, secrets: [PAYNOW_ID, PAYNOW_KEY] }, async (req) => {
   const uid = requireAuth(req);
-  const { bookingId, method, phone } = req.data as { bookingId: string; method: string; phone?: string };
-  const bookingRef = db().collection("bookings").doc(bookingId);
-  const booking = await bookingRef.get();
-  const b = booking.data();
-  if (!b || b.clientId !== uid) throw new HttpsError("permission-denied", "Not your booking.");
-  if (b.status !== S.awaitingPayment) throw new HttpsError("failed-precondition", "This booking is not awaiting payment.");
-
+  const { amountCents, method, phone } = req.data as { amountCents: number; method: string; phone?: string };
+  if (!Number.isInteger(amountCents) || amountCents < CONFIG.minTopUpCents) {
+    throw new HttpsError("invalid-argument", `Minimum top-up is ${(CONFIG.minTopUpCents / 100).toFixed(2)}.`);
+  }
   const user = (await db().collection("users").doc(uid).get()).data() ?? {};
-  const paymentRef = db().collection("payments").doc();
-  const amount = b.quotedFeeCents / 100;
+  // Clients can add a provider profile later, so check for the profile rather than the sign-up role.
+  const isProvider = user.role === "provider" || (await db().collection("providers").doc(uid).get()).exists;
+  if (!isProvider) throw new HttpsError("permission-denied", "Only service providers can top up.");
 
+  const paymentRef = db().collection("payments").doc();
   const pn = paynow();
   const payment = pn.createPayment(paymentRef.id, user.email ?? req.auth?.token.email ?? "");
-  payment.add(`${CONFIG.appName}: ${b.serviceTitle}`, amount);
+  payment.add(`${CONFIG.appName}: balance top-up`, amountCents / 100);
 
   let response;
   if (MOBILE_METHODS.includes(method)) {
@@ -53,10 +52,9 @@ export const initiatePayment = onCall({ region: REGION, secrets: [PAYNOW_ID, PAY
   }
 
   await paymentRef.set({
-    bookingId,
+    purpose: "topup",
     payerId: uid,
-    payeeId: b.providerId,
-    amountCents: b.quotedFeeCents,
+    amountCents,
     currency: CONFIG.currency,
     method,
     pollUrl: response.pollUrl,
@@ -64,7 +62,6 @@ export const initiatePayment = onCall({ region: REGION, secrets: [PAYNOW_ID, PAY
     createdAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
   });
-  await bookingRef.update({ paymentId: paymentRef.id, paymentStatus: "initiated" });
 
   return {
     paymentId: paymentRef.id,
@@ -74,7 +71,8 @@ export const initiatePayment = onCall({ region: REGION, secrets: [PAYNOW_ID, PAY
 });
 
 /**
- * Polls PayNow and, if paid, moves money into escrow and confirms the booking.
+ * Polls PayNow and, if paid, credits the provider's balance. A payment started before the move
+ * to direct payment goes into escrow, or back to the client if the booking has moved on.
  * Idempotent: safe to call from the callback and from the app (FR-6.9).
  */
 async function settlePayment(paymentId: string): Promise<string> {
@@ -87,7 +85,17 @@ async function settlePayment(paymentId: string): Promise<string> {
   const state = (status?.status ?? "").toLowerCase();
   logger.info("PayNow poll", { paymentId, state });
 
-  if (state === "paid" || state === "awaiting delivery" || state === "delivered") {
+  const paid = state === "paid" || state === "awaiting delivery" || state === "delivered";
+  if (paid && p.purpose === "topup") {
+    await db().runTransaction(async (tx) => {
+      const fresh = await tx.get(paymentRef);
+      if (fresh.get("status") !== "initiated") return;
+      walletEntry(tx, p.payerId, p.amountCents, "topup", null, "Balance top-up");
+      tx.update(paymentRef, { status: "paid", paynowStatus: state, paidAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
+    });
+    return "paid";
+  }
+  if (paid) {
     await db().runTransaction(async (tx) => {
       const fresh = await tx.get(paymentRef);
       if (fresh.get("status") !== "initiated") return;
@@ -111,7 +119,7 @@ async function settlePayment(paymentId: string): Promise<string> {
   }
   if (["cancelled", "failed", "disputed", "refunded"].includes(state)) {
     await paymentRef.update({ status: "failed", paynowStatus: state, updatedAt: FieldValue.serverTimestamp() });
-    await db().collection("bookings").doc(p.bookingId).update({ paymentStatus: "failed" });
+    if (p.bookingId) await db().collection("bookings").doc(p.bookingId).update({ paymentStatus: "failed" });
     return "failed";
   }
   return "initiated";

@@ -1,13 +1,18 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
 
+import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import '../../core/constants.dart';
 import '../../core/format.dart';
 import '../../core/theme.dart';
 import '../../models/models.dart';
 import '../../services/api.dart';
 import '../../services/db.dart';
+import '../../widgets/app_drawer.dart';
 import '../../widgets/common.dart';
 
-/// Balance, history and withdrawals (FR-6.6, FR-6.8).
+/// Balance, history, withdrawals (FR-6.6, FR-6.8) and, for providers, top-ups.
 class WalletScreen extends StatelessWidget {
   final AppUser user;
   const WalletScreen({super.key, required this.user});
@@ -64,13 +69,14 @@ class WalletScreen extends StatelessWidget {
     final c = Theme.of(context).colorScheme;
     final palette = context.palette;
     return Scaffold(
-      appBar: AppBar(title: const Text('Wallet')),
+      appBar: AppBar(leading: ShellMenu.button(context), title: const Text('Wallet')),
       body: ListView(padding: const EdgeInsets.only(bottom: 24), children: [
         StreamBuilder<int>(
           stream: Db.instance.walletBalance(user.uid),
           builder: (context, snap) {
             final bal = snap.data ?? 0;
             final canWithdraw = bal >= 500;
+            final isProvider = user.hasProviderProfile;
             return Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
               child: Reveal(
@@ -83,7 +89,7 @@ class WalletScreen extends StatelessWidget {
                     Row(children: [
                       Icon(Icons.account_balance_wallet_rounded, size: 18, color: palette.accent),
                       const SizedBox(width: 6),
-                      Text('Available balance', style: t.bodyMedium?.copyWith(color: Colors.white.withAlpha(215))),
+                      Text(isProvider ? 'Service balance' : 'Available balance', style: t.bodyMedium?.copyWith(color: Colors.white.withAlpha(215))),
                     ]),
                     const SizedBox(height: 8),
                     CountUp(
@@ -91,8 +97,31 @@ class WalletScreen extends StatelessWidget {
                       format: (v) => money(v.round()),
                       style: t.displayMedium?.copyWith(color: Colors.white),
                     ),
+                    if (isProvider) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'Clients pay you directly. $commissionLabel of each job comes off this balance when the job closes.',
+                        style: t.bodySmall?.copyWith(color: Colors.white.withAlpha(215)),
+                      ),
+                    ],
                     const SizedBox(height: 18),
-                    if (canWithdraw)
+                    if (isProvider) ...[
+                      GlowButton(
+                        label: 'Top up',
+                        onPressed: () => showModalBottomSheet<void>(
+                          context: context,
+                          isScrollControlled: true,
+                          showDragHandle: true,
+                          builder: (_) => TopUpSheet(user: user),
+                        ),
+                      ),
+                      if (canWithdraw)
+                        TextButton(
+                          style: TextButton.styleFrom(foregroundColor: Colors.white, minimumSize: const Size.fromHeight(44)),
+                          onPressed: () => _withdraw(context, bal),
+                          child: const Text('Withdraw unused balance'),
+                        ),
+                    ] else if (canWithdraw)
                       GlowButton(label: 'Withdraw', onPressed: () => _withdraw(context, bal))
                     else
                       Container(
@@ -168,6 +197,130 @@ class WalletScreen extends StatelessWidget {
             );
           },
         ),
+      ]),
+    );
+  }
+}
+
+/// Tops up a provider's balance through PayNow: EcoCash / OneMoney USSD push, or card via web.
+class TopUpSheet extends StatefulWidget {
+  final AppUser user;
+  const TopUpSheet({super.key, required this.user});
+  @override
+  State<TopUpSheet> createState() => _TopUpSheetState();
+}
+
+class _TopUpSheetState extends State<TopUpSheet> {
+  String _method = 'ecocash';
+  final _amount = TextEditingController(text: '10.00');
+  late final _phone = TextEditingController(text: toLocalPhone(widget.user.phone));
+  bool _busy = false;
+  String? _instructions;
+  Timer? _poll;
+  int _polls = 0;
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    _amount.dispose();
+    _phone.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pay() async {
+    final cents = parseMoneyToCents(_amount.text);
+    if (cents == null || cents < AppConfig.minTopUpCents) {
+      showSnack(context, 'Enter at least ${money(AppConfig.minTopUpCents)}', error: true);
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final start = await Api.instance.startTopUp(cents, _method, _method == 'web' ? null : toLocalPhone(_phone.text));
+      if (start.redirectUrl != null) {
+        await launchUrl(Uri.parse(start.redirectUrl!), mode: LaunchMode.externalApplication);
+      }
+      if (!mounted) return;
+      setState(() => _instructions = start.instructions ?? 'Approve the payment on your phone. This page updates automatically.');
+      _polls = 0;
+      _poll = Timer.periodic(const Duration(seconds: 5), (t) async {
+        _polls++;
+        try {
+          final status = await Api.instance.checkPayment(start.paymentId);
+          if (!mounted) {
+            t.cancel();
+            return;
+          }
+          if (status == 'paid') {
+            t.cancel();
+            final messenger = ScaffoldMessenger.of(context);
+            Navigator.pop(context);
+            messenger.showSnackBar(SnackBar(content: Text('${money(cents)} added to your balance.')));
+          } else if (status == 'failed') {
+            t.cancel();
+            setState(() {
+              _busy = false;
+              _instructions = null;
+            });
+            showSnack(context, 'Payment was cancelled or failed. Try again.', error: true);
+          } else if (_polls > 36) {
+            t.cancel();
+            setState(() => _busy = false);
+          }
+        } catch (_) {}
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() => _busy = false);
+        showSnack(context, e.toString(), error: true);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(24, 0, 24, 24 + MediaQuery.of(context).viewInsets.bottom),
+      child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text('Top up your balance', style: t.headlineSmall?.copyWith(fontWeight: FontWeight.w700)),
+        const SizedBox(height: 4),
+        Text('Your balance pays the $commissionLabel service charge on each job you finish.', style: t.bodySmall),
+        const SizedBox(height: 16),
+        if (_instructions == null) ...[
+          TextField(
+            controller: _amount,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            decoration: InputDecoration(labelText: 'Amount (${AppConfig.currencySymbol})'),
+          ),
+          const SizedBox(height: 16),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'ecocash', label: Text('EcoCash')),
+              ButtonSegment(value: 'onemoney', label: Text('OneMoney')),
+              ButtonSegment(value: 'web', label: Text('Card')),
+            ],
+            selected: {_method},
+            onSelectionChanged: (s) => setState(() => _method = s.first),
+          ),
+          const SizedBox(height: 16),
+          if (_method != 'web')
+            TextField(
+              controller: _phone,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(labelText: 'Mobile money number', hintText: '0771234567'),
+            ),
+          const SizedBox(height: 16),
+          FilledButton(
+            onPressed: _busy ? null : _pay,
+            child: _busy ? const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Pay with PayNow'),
+          ),
+        ] else ...[
+          const Center(child: CircularProgressIndicator()),
+          const SizedBox(height: 16),
+          Text(_instructions!, textAlign: TextAlign.center),
+          const SizedBox(height: 8),
+          if (!_busy) TextButton(onPressed: () => setState(() => _instructions = null), child: const Text('Start again')),
+        ],
       ]),
     );
   }

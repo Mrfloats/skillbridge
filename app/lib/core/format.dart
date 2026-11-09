@@ -6,7 +6,13 @@ import 'package:intl/intl.dart';
 import 'constants.dart';
 import 'theme.dart';
 
-String money(num cents) => '${AppConfig.currencySymbol}${(cents / 100).toStringAsFixed(2)}';
+String money(num cents) => '${cents < 0 ? '-' : ''}${AppConfig.currencySymbol}${(cents.abs() / 100).toStringAsFixed(2)}';
+
+/// The charge on a job of this value. Must match commissionOn in functions/src/config.ts.
+int commissionOn(int feeCents) => (feeCents * AppConfig.commissionRate).round();
+
+/// The charge rate as a label, such as "10%".
+String get commissionLabel => '${(AppConfig.commissionRate * 100).round()}%';
 
 int? parseMoneyToCents(String input) {
   final v = double.tryParse(input.replaceAll(RegExp(r'[^0-9.]'), ''));
@@ -24,7 +30,7 @@ String fmtTime(DateTime? d) => d == null ? '' : _time.format(d);
 
 String statusLabel(String s) => switch (s) {
       BookingStatus.pending => 'Requested',
-      BookingStatus.awaitingPayment => 'Awaiting payment',
+      BookingStatus.awaitingPayment => 'Quote sent',
       BookingStatus.confirmed => 'Confirmed',
       BookingStatus.inTransit => 'On the way',
       BookingStatus.inProgress => 'In progress',
@@ -51,8 +57,7 @@ double distanceKm(double lat1, double lng1, double lat2, double lng2) {
   double rad(double d) => d * math.pi / 180;
   final dLat = rad(lat2 - lat1);
   final dLng = rad(lng2 - lng1);
-  final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
-      math.cos(rad(lat1)) * math.cos(rad(lat2)) * math.sin(dLng / 2) * math.sin(dLng / 2);
+  final a = math.sin(dLat / 2) * math.sin(dLat / 2) + math.cos(rad(lat1)) * math.cos(rad(lat2)) * math.sin(dLng / 2) * math.sin(dLng / 2);
   return 2 * r * math.asin(math.sqrt(a));
 }
 

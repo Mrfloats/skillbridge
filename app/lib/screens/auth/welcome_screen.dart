@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -8,6 +10,9 @@ import 'register_screen.dart';
 
 class WelcomeScreen extends StatefulWidget {
   const WelcomeScreen({super.key});
+
+  /// How long each slide stays before the next one slides in.
+  static const autoAdvanceEvery = Duration(seconds: 4);
   @override
   State<WelcomeScreen> createState() => _WelcomeScreenState();
 }
@@ -15,15 +20,44 @@ class WelcomeScreen extends StatefulWidget {
 class _WelcomeScreenState extends State<WelcomeScreen> {
   final _page = PageController();
   int _index = 0;
+  Timer? _auto;
 
   static const _slides = [
     (null, 'Find trusted help nearby', 'Plumbers, electricians, carpenters and more, all ID-verified and rated by real clients.'),
     (Icons.event_available_rounded, 'Book in a few taps', 'Pick a time, get a quote and track your job from request to done.'),
-    (Icons.shield_rounded, 'Pay safely', 'Your money is held securely and released only when the job is finished. SOS help is one tap away.'),
+    (Icons.shield_rounded, 'Agree, then pay', 'Accept a quote in the app, then pay your provider directly. SOS help is one tap away.'),
   ];
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _startAuto();
+  }
+
+  /// Advances the slides on a timer, unless the device asks for reduced motion.
+  void _startAuto() {
+    _auto?.cancel();
+    if (Motion.reduced(context)) return;
+    _auto = Timer.periodic(WelcomeScreen.autoAdvanceEvery, (_) {
+      // Skip while another screen covers this one, or before the PageView is laid out.
+      if (!mounted || !TickerMode.valuesOf(context).enabled || !_page.hasClients) return;
+      _page.nextPage(duration: const Duration(milliseconds: 700), curve: Motion.emphasized);
+    });
+  }
+
+  /// Pauses the timer while the user swipes, and restarts it when they let go.
+  bool _onScroll(ScrollNotification n) {
+    if (n is ScrollStartNotification && n.dragDetails != null) {
+      _auto?.cancel();
+    } else if (n is ScrollEndNotification && !(_auto?.isActive ?? false)) {
+      _startAuto();
+    }
+    return false;
+  }
+
+  @override
   void dispose() {
+    _auto?.cancel();
     _page.dispose();
     super.dispose();
   }
@@ -46,34 +80,37 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                   child: const Align(alignment: Alignment.centerLeft, child: BrandLogo(height: 52)),
                 ),
                 Expanded(
-                  child: PageView.builder(
-                    controller: _page,
-                    itemCount: _slides.length,
-                    onPageChanged: (i) => setState(() => _index = i),
-                    itemBuilder: (_, i) {
-                      final (icon, title, body) = _slides[i];
-                      return AnimatedBuilder(
-                        animation: _page,
-                        builder: (context, _) {
-                          final page = _page.hasClients && _page.position.haveDimensions ? (_page.page ?? 0) : 0.0;
-                          final offset = (page - i).clamp(-1.0, 1.0);
-                          return Opacity(
-                            opacity: 1 - offset.abs() * 0.75,
-                            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                              // The icon drifts at a different speed to the text for a parallax feel.
-                              Transform.translate(
-                                offset: Offset(offset * 90, 0),
-                                child: Transform.scale(scale: 1 - offset.abs() * 0.2, child: icon == null ? const _FloatingLogo() : _SlideIcon(icon: icon)),
-                              ),
-                              const SizedBox(height: 40),
-                              Text(title, style: t.displaySmall?.copyWith(color: Colors.white), textAlign: TextAlign.center),
-                              const SizedBox(height: 14),
-                              Text(body, style: t.bodyLarge?.copyWith(color: Colors.white.withAlpha(205)), textAlign: TextAlign.center),
-                            ]),
-                          );
-                        },
-                      );
-                    },
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: _onScroll,
+                    // No item count, so the slides loop round forever.
+                    child: PageView.builder(
+                      controller: _page,
+                      onPageChanged: (i) => setState(() => _index = i % _slides.length),
+                      itemBuilder: (_, i) {
+                        final (icon, title, body) = _slides[i % _slides.length];
+                        return AnimatedBuilder(
+                          animation: _page,
+                          builder: (context, _) {
+                            final page = _page.hasClients && _page.position.haveDimensions ? (_page.page ?? 0) : 0.0;
+                            final offset = (page - i).clamp(-1.0, 1.0);
+                            return Opacity(
+                              opacity: 1 - offset.abs() * 0.75,
+                              child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                                // The icon drifts at a different speed to the text for a parallax feel.
+                                Transform.translate(
+                                  offset: Offset(offset * 90, 0),
+                                  child: Transform.scale(scale: 1 - offset.abs() * 0.2, child: icon == null ? const _FloatingLogo() : _SlideIcon(icon: icon)),
+                                ),
+                                const SizedBox(height: 40),
+                                Text(title, style: t.displaySmall?.copyWith(color: Colors.white), textAlign: TextAlign.center),
+                                const SizedBox(height: 14),
+                                Text(body, style: t.bodyLarge?.copyWith(color: Colors.white.withAlpha(205)), textAlign: TextAlign.center),
+                              ]),
+                            );
+                          },
+                        );
+                      },
+                    ),
                   ),
                 ),
                 Row(mainAxisAlignment: MainAxisAlignment.center, children: [

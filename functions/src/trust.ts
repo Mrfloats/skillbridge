@@ -92,6 +92,37 @@ export const onReviewCreated = onDocumentCreated({ document: "reviews/{id}", reg
   await notify(r.providerId, "New review", `${r.rating}★ from ${r.clientName}`, { type: "review", refId: r.bookingId });
 });
 
+/**
+ * The provider rates the client after a closed job (FR-8.5). One rating per booking. The client's
+ * average is kept in clientRatings/{clientId}, which providers can read and only this function writes.
+ */
+export const rateClient = onCall({ region: REGION }, async (req) => {
+  const uid = requireAuth(req);
+  const { bookingId, rating } = req.data as { bookingId: unknown; rating: unknown };
+  if (typeof bookingId !== "string" || !bookingId) throw new HttpsError("invalid-argument", "Missing booking.");
+  if (typeof rating !== "number" || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+    throw new HttpsError("invalid-argument", "Choose from 1 to 5 stars.");
+  }
+  const bRef = db().collection("bookings").doc(bookingId);
+  const rRef = db().collection("clientReviews").doc(bookingId);
+  const b = await db().runTransaction(async (tx) => {
+    const b = (await tx.get(bRef)).data();
+    if (!b || b.providerId !== uid) throw new HttpsError("permission-denied", "Only the provider on this job can rate the client.");
+    if (b.status !== "closed") throw new HttpsError("failed-precondition", "You can rate the client once the job is closed.");
+    if ((await tx.get(rRef)).exists) throw new HttpsError("already-exists", "You have already rated this client.");
+    const cRef = db().collection("clientRatings").doc(b.clientId);
+    const c = (await tx.get(cRef)).data() ?? {};
+    const sum = (c.ratingSum ?? 0) + rating;
+    const count = (c.reviewCount ?? 0) + 1;
+    tx.create(rRef, { bookingId, providerId: uid, providerName: b.providerName ?? "", clientId: b.clientId, rating, createdAt: FieldValue.serverTimestamp() });
+    tx.set(cRef, { ratingSum: sum, reviewCount: count, avgRating: Math.round((sum / count) * 10) / 10 }, { merge: true });
+    tx.update(bRef, { clientRated: true });
+    return b;
+  });
+  await notify(b.clientId, "New rating", `${rating}★ from ${b.providerName} for ${b.serviceTitle}`, { type: "booking", refId: bookingId });
+  return { ok: true };
+});
+
 /** SOS: alert admins and the user's trusted contacts (FR-9.2, FR-9.4). */
 export const onSosCreated = onDocumentCreated({ document: "sosAlerts/{id}", region: REGION }, async (event) => {
   const a = event.data?.data();

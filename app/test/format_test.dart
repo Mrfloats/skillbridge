@@ -5,6 +5,14 @@ void main() {
   test('money formats cents', () {
     expect(money(3550), 'US\$35.50');
     expect(money(0), 'US\$0.00');
+    expect(money(-350), '-US\$3.50');
+  });
+
+  test('commissionOn takes 10% and rounds to the nearest cent', () {
+    expect(commissionOn(3500), 350);
+    expect(commissionOn(100), 10);
+    expect(commissionOn(1234), 123);
+    expect(commissionOn(1235), 124);
   });
 
   test('parseMoneyToCents', () {

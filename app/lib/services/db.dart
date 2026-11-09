@@ -52,6 +52,7 @@ class Db {
     double maxDistanceKm = AppConfig.defaultSearchRadiusKm,
     double minRating = 0,
     String query = '',
+    String? excludeUid,
   }) async {
     Query<Map<String, dynamic>> q = fs.collection('providers').where('isVerified', isEqualTo: true);
     if (categoryId != null) q = q.where('categoryIds', arrayContains: categoryId);
@@ -60,7 +61,8 @@ class Db {
     final results = <ProviderMatch>[];
     for (final d in snap.docs) {
       final p = ProviderProfile.fromDoc(d);
-      if (p.isSuspended || !p.isAvailable || p.baseLocation == null) continue;
+      // excludeUid: someone who is also a provider does not see themselves while booking.
+      if (p.uid == excludeUid || p.isSuspended || !p.isAvailable || p.baseLocation == null) continue;
       if (p.avgRating < minRating) continue;
       if (needle.isNotEmpty && !p.fullName.toLowerCase().contains(needle) && !p.bio.toLowerCase().contains(needle)) {
         continue;
@@ -150,6 +152,13 @@ class Db {
         'repliedAt': FieldValue.serverTimestamp(),
       });
 
+  /// A client's average rating from providers (FR-8.5). Null until they have been rated.
+  Stream<RatingSummary?> clientRating(String clientId) => fs.collection('clientRatings').doc(clientId).snapshots().map((d) {
+        final m = d.data();
+        if (m == null) return null;
+        return (average: (m['avgRating'] as num? ?? 0).toDouble(), count: (m['reviewCount'] as num? ?? 0).toInt());
+      });
+
   // ---------- Chat ----------
   Stream<List<ChatMessage>> messages(String chatId) => fs
       .collection('chats')
@@ -227,6 +236,24 @@ class Db {
       .map((s) => s.docs.map(AppNotification.fromDoc).toList());
 
   Future<void> markNotificationRead(String id) => fs.collection('notifications').doc(id).update({'isRead': true});
+
+  // ---------- Support ----------
+  /// The user's own messages to support, newest first. Sorted here, so no extra index is needed.
+  Stream<List<SupportTicket>> mySupportTickets(String uid) => fs
+      .collection('supportTickets')
+      .where('userId', isEqualTo: uid)
+      .limit(50)
+      .snapshots()
+      .map((s) => _newestFirst(s.docs.map(SupportTicket.fromDoc).toList()));
+
+  Stream<List<SupportTicket>> openSupportTickets() => fs
+      .collection('supportTickets')
+      .where('status', isEqualTo: 'open')
+      .limit(200)
+      .snapshots()
+      .map((s) => _newestFirst(s.docs.map(SupportTicket.fromDoc).toList()));
+
+  static List<SupportTicket> _newestFirst(List<SupportTicket> l) => l..sort((a, b) => (b.createdAt ?? DateTime.now()).compareTo(a.createdAt ?? DateTime.now()));
 
   // ---------- Admin ----------
   Stream<List<ProviderProfile>> pendingProviders() => fs

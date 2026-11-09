@@ -18,12 +18,14 @@ import 'screens/provider/provider_shell.dart';
 import 'services/auth_service.dart';
 import 'services/db.dart';
 import 'services/device_services.dart';
+import 'services/settings_service.dart';
 import 'widgets/common.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   AppTheme.registerFontLicenses();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  await AppSettings.instance.load();
   runApp(const SkillBridgeApp());
 }
 
@@ -32,18 +34,22 @@ class SkillBridgeApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: AppConfig.appName,
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.light(),
-      darkTheme: AppTheme.dark(),
-      supportedLocales: const [Locale('en', 'GB'), Locale('en', 'US')],
-      localizationsDelegates: const [
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      home: const AuthGate(),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: AppSettings.instance.themeMode,
+      builder: (context, themeMode, _) => MaterialApp(
+        title: AppConfig.appName,
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.light(),
+        darkTheme: AppTheme.dark(),
+        themeMode: themeMode,
+        supportedLocales: const [Locale('en', 'GB'), Locale('en', 'US')],
+        localizationsDelegates: const [
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        home: const AuthGate(),
+      ),
     );
   }
 }
@@ -138,7 +144,8 @@ class _UserGateState extends State<UserGate> {
                   onUsePhone: () => setState(() => _verifyByPhone = true),
                 );
         } else {
-          child = _RoleHome(key: ValueKey(appUser.role), user: appUser);
+          // Switching between client and provider mode swaps the whole home screen.
+          child = _RoleHome(key: ValueKey((appUser.role, appUser.inProviderMode)), user: appUser);
         }
         return AnimatedSwitcher(duration: Motion.slow, switchInCurve: Motion.emphasized, child: child);
       },
@@ -162,11 +169,9 @@ class _RoleHomeState extends State<_RoleHome> {
 
   @override
   Widget build(BuildContext context) {
-    return switch (widget.user.role) {
-      Roles.admin => AdminShell(user: widget.user),
-      Roles.provider => ProviderShell(user: widget.user),
-      _ => ClientShell(user: widget.user),
-    };
+    final user = widget.user;
+    if (user.role == Roles.admin) return AdminShell(user: user);
+    return user.inProviderMode ? ProviderShell(user: user) : ClientShell(user: user);
   }
 }
 
@@ -195,7 +200,7 @@ class _SuspendedScreen extends StatelessWidget {
         body: EmptyState(
           icon: Icons.block_rounded,
           title: 'Account suspended',
-          message: 'Your account has been suspended. Contact support@skillbridge.app for help.',
+          message: 'Your account has been suspended. Contact ${AppConfig.supportEmail} for help.',
           action: OutlinedButton(onPressed: AuthService.instance.logout, child: const Text('Log out')),
         ),
       );

@@ -96,7 +96,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 }
               }
               if (msgs.isEmpty) {
-                return const EmptyState(icon: Icons.forum_outlined, title: 'No messages yet', message: 'Agree on details here. Keep all payments in the app.');
+                return const EmptyState(icon: Icons.forum_outlined, title: 'No messages yet', message: 'Agree on the job details here.');
               }
               return ListView.custom(
                 reverse: true,

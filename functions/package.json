@@ -3,6 +3,7 @@
   "main": "lib/index.js",
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && firebase emulators:exec --only auth,firestore,functions --project demo-skillbridge \"node --test test/direct-pay.test.js test/client-ratings.test.js test/account.test.js test/mode.test.js\"",
     "deploy": "npm run build && firebase deploy --only functions",
     "logs": "firebase functions:log"
   },

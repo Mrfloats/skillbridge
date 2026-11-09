@@ -5,10 +5,12 @@ import '../../core/format.dart';
 import '../../core/theme.dart';
 import '../../models/models.dart';
 import '../../services/db.dart';
+import '../../widgets/app_drawer.dart';
 import '../../widgets/common.dart';
 import '../client/provider_detail_screen.dart';
 import '../shared/booking_detail_screen.dart';
 import '../shared/notifications_screen.dart';
+import '../shared/wallet_screen.dart';
 import 'provider_setup_screen.dart';
 import 'verification_screen.dart';
 
@@ -26,7 +28,7 @@ class ProviderDashboardScreen extends StatelessWidget {
         if (p == null) return const Scaffold(body: Loading());
         return Scaffold(
           appBar: AppBar(
-            leading: const Center(child: BrandMark(size: 32)),
+            leading: ShellMenu.button(context) ?? const Center(child: BrandMark(size: 32)),
             title: const Text('Dashboard'),
             actions: [
               IconButton(
@@ -43,6 +45,7 @@ class ProviderDashboardScreen extends StatelessWidget {
               return ListView(padding: const EdgeInsets.only(bottom: 24), children: [
                 _VerificationBanner(provider: p, user: user),
                 _SetupBanner(provider: p, user: user),
+                if (p.isVerified) _BalanceBanner(user: user),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
                   child: Reveal(
@@ -59,8 +62,7 @@ class ProviderDashboardScreen extends StatelessWidget {
                         child: SwitchListTile(
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
                           title: Text(p.isAvailable ? 'Available for bookings' : 'Not taking bookings'),
-                          subtitle: Text('Clients only see you in search when this is on',
-                              style: p.isAvailable ? TextStyle(color: Theme.of(context).colorScheme.onPrimaryContainer) : null),
+                          subtitle: Text('Clients only see you in search when this is on', style: p.isAvailable ? TextStyle(color: Theme.of(context).colorScheme.onPrimaryContainer) : null),
                           value: p.isAvailable,
                           onChanged: (v) => runGuarded(context, () => Db.instance.updateProvider(user.uid, {'isAvailable': v})),
                         ),
@@ -135,6 +137,35 @@ class _SetupBanner extends StatelessWidget {
   }
 }
 
+class _BalanceBanner extends StatelessWidget {
+  final AppUser user;
+  const _BalanceBanner({required this.user});
+  @override
+  Widget build(BuildContext context) {
+    final c = Theme.of(context).colorScheme;
+    return StreamBuilder<int>(
+      stream: Db.instance.walletBalance(user.uid),
+      builder: (context, snap) {
+        final balance = snap.data;
+        if (balance == null || balance > 0) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          child: Reveal(
+            child: _Banner(
+              color: c.errorContainer,
+              foreground: c.onErrorContainer,
+              icon: Icons.account_balance_wallet_outlined,
+              title: 'Top up to send quotes',
+              subtitle: 'Your balance is ${money(balance)}. It pays the $commissionLabel service charge on each job.',
+              onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => WalletScreen(user: user))),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _Stats extends StatelessWidget {
   final List<Booking> bookings;
   final ProviderProfile provider;
@@ -146,8 +177,7 @@ class _Stats extends StatelessWidget {
     final today = DateTime(now.year, now.month, now.day);
     final weekStart = today.subtract(Duration(days: today.weekday - 1));
     final monthStart = DateTime(now.year, now.month);
-    int earned(DateTime from) =>
-        bookings.where((b) => b.status == BookingStatus.closed && !b.serviceDate.isBefore(from)).fold(0, (s, b) => s + (b.quotedFeeCents ?? 0) - (b.commissionCents ?? 0));
+    int earned(DateTime from) => bookings.where((b) => b.status == BookingStatus.closed && !b.serviceDate.isBefore(from)).fold(0, (s, b) => s + (b.quotedFeeCents ?? 0) - (b.commissionCents ?? 0));
     int jobs(DateTime from) => bookings.where((b) => b.status == BookingStatus.closed && !b.serviceDate.isBefore(from)).length;
 
     final t = Theme.of(context).textTheme;
@@ -283,8 +313,7 @@ class _Upcoming extends StatelessWidget {
   const _Upcoming({required this.bookings, required this.user});
   @override
   Widget build(BuildContext context) {
-    final upcoming = bookings.where((b) => BookingStatus.onSite.contains(b.status) || b.status == BookingStatus.awaitingPayment).toList()
-      ..sort((a, b) => a.serviceDate.compareTo(b.serviceDate));
+    final upcoming = bookings.where((b) => BookingStatus.onSite.contains(b.status) || b.status == BookingStatus.awaitingPayment).toList()..sort((a, b) => a.serviceDate.compareTo(b.serviceDate));
     final byDay = <String, List<Booking>>{};
     for (final b in upcoming) {
       byDay.putIfAbsent(fmtDate(b.serviceDate), () => []).add(b);
